@@ -81,6 +81,9 @@ MasterConnection_activate(MasterConnection self);
 static bool
 MasterConnection_isActive(MasterConnection self);
 
+static bool
+sendASDUInternal(MasterConnection self, CS101_ASDU asdu);
+
 #define CS104_DEFAULT_PORT 2404
 
 static struct sCS104_APCIParameters defaultConnectionParameters = {
@@ -1790,23 +1793,21 @@ CS104_Slave_setRawMessageHandler(CS104_Slave self, CS104_SlaveRawMessageHandler 
 }
 
 #if (CONFIG_CS104_APROFILE == 1)
+static bool
+cs104Server_sendAsdu(void* connection, CS101_ASDU asdu)
+{
+    MasterConnection self = (MasterConnection)connection;
+    return sendASDUInternal(self, asdu);
+}
+#endif
+
+#if (CONFIG_CS104_APROFILE == 1)
 void
 CS104_Slave_setSecurityConfig(CS104_Slave self, const CS104_SecurityConfig* sec,
                               const CS104_CertConfig* cert, const CS104_RoleConfig* role)
 {
     self->securityConfigured = true;
-    if (sec)
-        self->securityConfig = *sec;
-    if (cert)
-        self->certConfig = *cert;
-    if (role)
-        self->roleConfig = *role;
-
-    for (int i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++)
-    {
-        if (self->masterConnections[i] && self->masterConnections[i]->sec == NULL)
-            self->masterConnections[i]->sec = AProfile_create();
-    }
+    /* AProfile contexts will be created in MasterConnection_init when connections are established */
 }
 #else
 void
@@ -2057,7 +2058,6 @@ sendASDUInternal(MasterConnection self, CS101_ASDU asdu)
 
         if (isSentBufferFull(self) == false)
         {
-
             FrameBuffer frameBuffer;
 
             struct sBufferFrame bufferFrame;
@@ -2208,11 +2208,15 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
                         if (slave->interrogationHandler(slave->interrogationHandlerParameter,
                                                         &(self->iMasterConnection), asdu,
                                                         InterrogationCommand_getQOI(irc)))
+                        {
                             messageHandled = true;
+                        }
                     }
                 }
-                else
-                    return false;
+            }
+            else
+            {
+                messageHandled = true;
             }
         }
         else
@@ -2250,11 +2254,15 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
                         if (slave->counterInterrogationHandler(slave->counterInterrogationHandlerParameter,
                                                                &(self->iMasterConnection), asdu,
                                                                CounterInterrogationCommand_getQCC(cic)))
+                        {
                             messageHandled = true;
+                        }
                     }
                 }
-                else
-                    return false;
+            }
+            else
+            {
+                messageHandled = true;
             }
         }
         else
@@ -2289,11 +2297,14 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
                 if (rc)
                 {
                     if (slave->readHandler(slave->readHandlerParameter, &(self->iMasterConnection), asdu,
-                                           InformationObject_getObjectAddress((InformationObject)rc)))
+                                           InformationObject_getObjectAddress((InformationObject)rc))) {
                         messageHandled = true;
+                    }
                 }
-                else
-                    return false;
+            }
+            else
+            {
+                messageHandled = true;
             }
         }
         else
@@ -2354,7 +2365,9 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
                     messageHandled = true;
                 }
                 else
-                    return false;
+                {
+                    messageHandled = true;
+                }
             }
         }
         else
@@ -2451,11 +2464,17 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
                     {
                         if (slave->resetProcessHandler(slave->resetProcessHandlerParameter, &(self->iMasterConnection),
                                                        asdu, ResetProcessCommand_getQRP(rpc)))
+                        {
                             messageHandled = true;
+                        }
                     }
                 }
-                else
-                    return false;
+            }
+            else
+            {
+                /* No handler registered - send negative response */
+                responseNegative(asdu, self, CS101_COT_UNKNOWN_TYPE_ID);
+                messageHandled = true;
             }
         }
         else
@@ -2503,14 +2522,14 @@ handleASDU(MasterConnection self, CS101_ASDU asdu)
                         if (slave->delayAcquisitionHandler(slave->delayAcquisitionHandlerParameter,
                                                            &(self->iMasterConnection), asdu,
                                                            DelayAcquisitionCommand_getDelay(dac)))
+                        {
                             messageHandled = true;
+                        }
                     }
                 }
-                else
-                    return false;
             }
         }
-        else
+        else if (slave->delayAcquisitionHandler == NULL)
         {
             responseCOTUnknown(asdu, self);
             messageHandled = true;
@@ -2939,6 +2958,11 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
                 int asduLen = msgSize - 6;
 
 #if (CONFIG_CS104_APROFILE == 1)
+                /*
+                 * For IEC 62351-5 (A-profile) security, the ASDU is unwrapped and verified here.
+                 * The AProfile_handleInPdu function should be implemented to handle the security layer,
+                 * check the MAC and sequence numbers, and then provide the original ASDU for processing.
+                 */
                 if (self->sec)
                 {
                     AProfileKind kind =
@@ -3035,6 +3059,7 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
             {
                 DEBUG_PRINT(
                     "CS104 SLAVE: Unconfirmed messages after STOPDT_ACT -> pending unconfirmed stopped state\n");
+                self->state = M_CON_STATE_UNCONFIRMED_STOPPED;
             }
             else
             {
@@ -3043,18 +3068,8 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
                 self->state = M_CON_STATE_STOPPED;
 
                 if (writeToSocket(self, STOPDT_CON_MSG, STOPDT_CON_MSG_SIZE) < 0)
-                {
-#if (CONFIG_USE_SEMAPHORES == 1)
-                    Semaphore_post(self->stateLock);
-#endif
-
                     return false;
-                }
             }
-
-#if (CONFIG_USE_SEMAPHORES == 1)
-            Semaphore_post(self->stateLock);
-#endif
         }
 
         /* Check for TESTFR_CON message */
@@ -3783,6 +3798,18 @@ MasterConnection_init(MasterConnection self, Socket skt, MessageQueue lowPrioQue
 
         self->waitingForTestFRcon = false;
 
+#if (CONFIG_CS104_APROFILE == 1)
+        /* Create AProfile context if security is configured and not already created */
+        if (self->slave->securityConfigured && self->sec == NULL)
+        {
+            self->sec = AProfile_create(self, cs104Server_sendAsdu, &(self->slave->alParameters), false); /* false = server */
+            if (self->sec == NULL)
+            {
+                return false;
+            }
+        }
+#endif
+
         return true;
     }
     else
@@ -3837,6 +3864,14 @@ MasterConnection_close(MasterConnection self)
 
     self->isRunning = false;
     self->state = M_CON_STATE_STOPPED;
+
+#if (CONFIG_CS104_APROFILE == 1)
+    /* Clean up AProfile context when connection closes */
+    if (self->sec) {
+        AProfile_destroy(self->sec);
+        self->sec = NULL;
+    }
+#endif
 
 #if (CONFIG_USE_SEMAPHORES == 1)
     Semaphore_post(self->stateLock);

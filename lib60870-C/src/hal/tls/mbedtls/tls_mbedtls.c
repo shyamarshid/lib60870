@@ -41,7 +41,6 @@
 #define DEBUG_PRINT(fmt, ...) do {} while(0)
 #endif
 
-
 struct sTLSConfiguration {
     mbedtls_entropy_context entropy;
     mbedtls_ctr_drbg_context ctr_drbg;
@@ -591,13 +590,14 @@ udpatedCRL(TLSConfiguration self)
 
     if (self->conf.endpoint == MBEDTLS_SSL_IS_SERVER)
     {
-        mbedtls_ssl_cache_entry *cur = self->cache.chain;
-
-        while (cur)
-        {
-            cur->timestamp = 0;
-            cur = cur->next;
-        }
+        // mbedtls_ssl_cache_entry *cur = self->cache.chain;
+        // while (cur)
+        // {
+        //     cur->timestamp = 0;
+        //     cur = cur->next;
+        // }
+        mbedtls_ssl_cache_free(&(self->cache));
+        mbedtls_ssl_cache_init(&(self->cache));
     }
 }
 
@@ -757,7 +757,21 @@ createSecurityEvents(TLSConfiguration config, int ret, uint32_t flags, TLSSocket
         break;
 
     default:
-        raiseSecurityEvent(config,TLS_SEC_EVT_INCIDENT, TLS_EVENT_CODE_ALM_HANDSHAKE_FAILED_UNKNOWN_REASON, "Alarm: handshake failed for unknown reason", socket);
+        // {
+        //     char errBuf[128];
+        //     mbedtls_strerror(ret, errBuf, 127);
+        //     errBuf[127] = 0;
+        //     char msgBuf[256];
+        //     snprintf(msgBuf, 255, "Alarm: handshake failed for unknown reason (err: %s)", errBuf);
+        //     msgBuf[255] = 0;
+        //     raiseSecurityEvent(config,TLS_SEC_EVT_INCIDENT, TLS_EVENT_CODE_ALM_HANDSHAKE_FAILED_UNKNOWN_REASON, msgBuf, socket);
+        // }
+        {
+            char msgBuf[256];
+            snprintf(msgBuf, 255, "Alarm: handshake failed for unknown reason (err: -0x%04x)", -ret);
+            msgBuf[255] = 0;
+            raiseSecurityEvent(config,TLS_SEC_EVT_INCIDENT, TLS_EVENT_CODE_ALM_HANDSHAKE_FAILED_UNKNOWN_REASON, msgBuf, socket);
+        }
         break;
     }
 }
@@ -1041,7 +1055,8 @@ TLSSocket_performHandshake(TLSSocket self)
     {
         DEBUG_PRINT("TLS", "TLSSocket_performHandshake failed -> ret=%i\n", ret);
 
-        raiseSecurityEvent(self->tlsConfig, TLS_SEC_EVT_WARNING, TLS_EVENT_CODE_INF_SESSION_RENEGOTIATION, "Alarm: TLS session renegotiation failed", self);
+        uint32_t flags = mbedtls_ssl_get_verify_result(&(self->ssl));
+        createSecurityEvents(self->tlsConfig, ret, flags, self);
 
         /* mbedtls_ssl_renegotiate mandates to reset the ssl session in case of errors */
         ret = mbedtls_ssl_session_reset(&(self->ssl));
@@ -1081,6 +1096,8 @@ startRenegotiationIfRequired(TLSSocket self)
 
     raiseSecurityEvent(self->tlsConfig, TLS_SEC_EVT_INFO, TLS_EVENT_CODE_INF_SESSION_RENEGOTIATION, "Info: session renegotiation started", self);
 
+    self->lastRenegotiationTime = Hal_getMonotonicTimeInMs();
+
     if (TLSSocket_performHandshake(self) == false)
     {
         DEBUG_PRINT("TLS", " renegotiation failed\n");
@@ -1088,7 +1105,6 @@ startRenegotiationIfRequired(TLSSocket self)
     }
 
     DEBUG_PRINT("TLS", " started renegotiation\n");
-    self->lastRenegotiationTime = Hal_getMonotonicTimeInMs();
 
     return true;
 }

@@ -1,17 +1,80 @@
-add_subdirectory(cs101_master_balanced)
-add_subdirectory(cs101_master_unbalanced)
-add_subdirectory(cs101_slave)
-add_subdirectory(cs101_slave_files)
-add_subdirectory(cs104_client)
-add_subdirectory(cs104_client_async)
-add_subdirectory(cs104_server)
-add_subdirectory(cs104_server_no_threads)
-add_subdirectory(cs104_server_files)
-add_subdirectory(cs104_redundancy_server)
-add_subdirectory(multi_client_server)
+add_executable(cs101_master_balanced cs101_master_balanced/master_example.c)
+target_link_libraries(cs101_master_balanced PRIVATE lib60870)
 
-if (WITH_MBEDTLS OR WITH_MBEDTLS3)
-add_subdirectory(tls_client)
-add_subdirectory(tls_server)
-endif (WITH_MBEDTLS OR WITH_MBEDTLS3)
+add_executable(cs101_master_unbalanced cs101_master_unbalanced/master_example.c)
+target_link_libraries(cs101_master_unbalanced PRIVATE lib60870)
 
+add_executable(cs101_slave cs101_slave/slave_example.c)
+target_link_libraries(cs101_slave PRIVATE lib60870)
+
+add_executable(cs101_slave_files cs101_slave_files/cs101_slave_files.c)
+target_link_libraries(cs101_slave_files PRIVATE lib60870)
+
+add_executable(cs104_client cs104_client/simple_client.c)
+target_link_libraries(cs104_client PRIVATE lib60870)
+
+add_executable(cs104_client_async cs104_client_async/cs104_client_async.c)
+target_link_libraries(cs104_client_async PRIVATE lib60870)
+
+add_executable(cs104_server cs104_server/simple_server.c)
+target_link_libraries(cs104_server PRIVATE lib60870)
+
+add_executable(cs104_server_no_threads cs104_server_no_threads/cs104_server_no_threads.c)
+target_link_libraries(cs104_server_no_threads PRIVATE lib60870)
+
+add_executable(cs104_server_files cs104_server_files/cs104_server_files.c)
+target_link_libraries(cs104_server_files PRIVATE lib60870)
+
+add_executable(cs104_redundancy_server cs104_redundancy_server/cs104_redundancy_server.c)
+target_link_libraries(cs104_redundancy_server PRIVATE lib60870)
+
+add_executable(multi_client_server multi_client_server/multi_client_server.c)
+target_link_libraries(multi_client_server PRIVATE lib60870)
+
+add_executable(tls_client tls_client/tls_client.c)
+target_link_libraries(tls_client PRIVATE lib60870)
+
+add_executable(tls_server tls_server/tls_server.c)
+target_link_libraries(tls_server PRIVATE lib60870)
+
+
+set(EXAMPLE_TARGETS
+    cs101_master_balanced
+    cs101_master_unbalanced
+    cs101_slave
+    cs101_slave_files
+    cs104_client
+    cs104_client_async
+    cs104_server
+    cs104_server_no_threads
+    cs104_server_files
+    cs104_redundancy_server
+    multi_client_server
+    tls_client
+    tls_server
+)
+
+if(WIN32)
+    foreach(example_target ${EXAMPLE_TARGETS})
+        target_link_libraries(${example_target} PRIVATE legacy_stdio_definitions)
+    endforeach()
+endif()
+
+if(WITH_MBEDTLS)
+    foreach(example_target ${EXAMPLE_TARGETS})
+        if (TARGET ${example_target})
+            # Link mbedtls explicitly to ensure symbols are resolved
+            target_link_libraries(${example_target} PRIVATE mbedtls_static)
+            target_include_directories(${example_target} PRIVATE 
+                "${CMAKE_SOURCE_DIR}/lib60870-C/dependencies/mbedtls-2.28.8/include"
+            )
+        endif()
+    endforeach()
+endif()
+
+# This is needed because the original project had a mix of static and shared lib linking
+# This ensures all examples link to the static lib60870
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    "${CMAKE_SOURCE_DIR}/lib60870-C/examples/cs104_client/CMakeLists.txt"
+    "${CMAKE_SOURCE_DIR}/lib60870-C/examples/cs104_server/CMakeLists.txt"
+)

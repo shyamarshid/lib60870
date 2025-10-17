@@ -316,6 +316,14 @@ FileDirectory_getFromBuffer(FileDirectory self, CS101_AppLayerParameters paramet
 QueryLog
 QueryLog_getFromBuffer(QueryLog self, CS101_AppLayerParameters parameters, uint8_t* msg, int msgSize, int startIndex);
 
+SecurityPublicKey
+SecurityPublicKey_getFromBuffer(SecurityPublicKey self, CS101_AppLayerParameters parameters, uint8_t* msg, int msgSize, int startIndex, bool isSequence);
+
+SecurityEncryptedData
+SecurityEncryptedData_getFromBuffer(SecurityEncryptedData self, CS101_AppLayerParameters parameters, uint8_t* msg, int msgSize, int startIndex, bool isSequence);
+
+#pragma pack(push, 1)
+
 /********************************************
  * static InformationObject type definitions
  ********************************************/
@@ -1186,6 +1194,26 @@ struct sQueryLog
     struct sCP56Time2a rangeStopTime;
 };
 
+struct sSecurityPublicKey
+{
+    int objectAddress;
+    TypeID type;
+    InformationObjectVFT virtualFunctionTable;
+    int keyLength;
+    uint8_t keyValue[256];
+};
+
+struct sSecurityEncryptedData
+{
+    int objectAddress;
+    TypeID type;
+    InformationObjectVFT virtualFunctionTable;
+    uint8_t nonce[12];
+    uint8_t tag[16];
+    int ciphertextLength;
+    uint8_t ciphertext[256];
+};
+
 union uInformationObject {
     struct sSinglePointInformation m1;
     struct sStepPositionInformation m2;
@@ -1227,6 +1255,10 @@ union uInformationObject {
     struct sStepCommandWithCP56Time2a m38;
     struct sFileDirectory m39;
     struct sQueryLog m40;
+    struct sSecurityPublicKey m41;
+    struct sSecurityEncryptedData m42;
 };
+
+#pragma pack(pop)
 
 #endif /* SRC_INC_INFORMATION_OBJECTS_INTERNAL_H_ */
