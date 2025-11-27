@@ -69,8 +69,23 @@ static const uint8_t UPDATE_ENC_KEY[APROFILE_SESSION_KEY_LENGTH] = {
     0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF
 };
 
+static bool
+fileExists(const char* path)
+{
+    if (path == NULL)
+        return false;
+
+    FILE* f = fopen(path, "rb");
+
+    if (f == NULL)
+        return false;
+
+    fclose(f);
+    return true;
+}
+
 static void
-configureSecurity(CS104_SecurityConfig* sec)
+configureSecurity(CS104_SecurityConfig* sec, bool useStaticKeys)
 {
     memset(sec, 0, sizeof(*sec));
 
@@ -82,19 +97,54 @@ configureSecurity(CS104_SecurityConfig* sec)
     sec->dpaAlgorithm = APROFILE_DPA_HMAC_SHA256;
 #endif
 
-    sec->hasStaticSessionKeys = true;
-    memcpy(sec->outboundSessionKey, CLIENT_OUTBOUND_SESSION_KEY, sizeof(sec->outboundSessionKey));
-    memcpy(sec->inboundSessionKey, CLIENT_INBOUND_SESSION_KEY, sizeof(sec->inboundSessionKey));
+    if (useStaticKeys) {
+        sec->hasStaticSessionKeys = true;
+        memcpy(sec->outboundSessionKey, CLIENT_OUTBOUND_SESSION_KEY, sizeof(sec->outboundSessionKey));
+        memcpy(sec->inboundSessionKey, CLIENT_INBOUND_SESSION_KEY, sizeof(sec->inboundSessionKey));
 
-    sec->hasUpdateKeys = true;
-    memcpy(sec->authenticationUpdateKey, UPDATE_AUTH_KEY, sizeof(sec->authenticationUpdateKey));
-    memcpy(sec->encryptionUpdateKey, UPDATE_ENC_KEY, sizeof(sec->encryptionUpdateKey));
+        sec->hasUpdateKeys = true;
+        memcpy(sec->authenticationUpdateKey, UPDATE_AUTH_KEY, sizeof(sec->authenticationUpdateKey));
+        memcpy(sec->encryptionUpdateKey, UPDATE_ENC_KEY, sizeof(sec->encryptionUpdateKey));
+    }
 }
 
 static void
-printSecurityConfig(const CS104_SecurityConfig* sec)
+printSecurityConfig(const CS104_SecurityConfig* sec, bool usingStaticKeys)
 {
-    printf("[CLIENT] ALS config: AIM=0x%04X AIS=0x%04X DPA=%s\n", sec->aim, sec->ais, getDpaName(sec->dpaAlgorithm));
+    printf("[CLIENT] ALS config: AIM=0x%04X AIS=0x%04X DPA=%s (keys: %s)\n", sec->aim, sec->ais,
+           getDpaName(sec->dpaAlgorithm), usingStaticKeys ? "preloaded" : "handshake/ECDH");
+}
+
+static CS104_CertConfig
+buildCertConfig(const char* localCertPath, const char* peerCertPath)
+{
+    CS104_CertConfig cert = { .localCertificateVerified = true, .peerCertificateVerified = true };
+
+    if (localCertPath) {
+        bool exists = fileExists(localCertPath);
+        printf("[CLIENT] Local certificate: %s (%s)\n", localCertPath,
+               exists ? "found" : "not found - verification skipped");
+    }
+    else {
+        printf("[CLIENT] Local certificate: none provided (verification skipped)\n");
+    }
+
+    if (peerCertPath) {
+        bool exists = fileExists(peerCertPath);
+        printf("[CLIENT] Peer certificate: %s (%s)\n", peerCertPath,
+               exists ? "found" : "not found - verification skipped");
+    }
+    else {
+        printf("[CLIENT] Peer certificate: none provided (verification skipped)\n");
+    }
+
+    return cert;
+}
+
+static void
+printClientUsage(void)
+{
+    printf("Usage: client_aprofile_debug [ip] [port] [localIp] [localPort] [--local-cert PATH] [--peer-cert PATH] [--static-keys]\n");
 }
 
 static void
@@ -212,18 +262,48 @@ main(int argc, char** argv)
     uint16_t port = IEC_60870_5_104_DEFAULT_PORT;
     const char* localIp = NULL;
     int localPort = -1;
+    const char* localCertPath = NULL;
+    const char* peerCertPath = NULL;
+    bool useStaticKeys = false;
 
-    if (argc > 1)
-        ip = argv[1];
+    bool ipSet = false;
+    bool portSet = false;
+    bool localIpSet = false;
+    bool localPortSet = false;
 
-    if (argc > 2)
-        port = atoi(argv[2]);
-
-    if (argc > 3)
-        localIp = argv[3];
-
-    if (argc > 4)
-        localPort = atoi(argv[4]);
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--help") == 0) {
+            printClientUsage();
+            return 0;
+        }
+        else if (strcmp(argv[i], "--local-cert") == 0 && (i + 1 < argc)) {
+            localCertPath = argv[++i];
+        }
+        else if (strcmp(argv[i], "--peer-cert") == 0 && (i + 1 < argc)) {
+            peerCertPath = argv[++i];
+        }
+        else if (strcmp(argv[i], "--static-keys") == 0) {
+            useStaticKeys = true;
+        }
+        else {
+            if (ipSet == false) {
+                ip = argv[i];
+                ipSet = true;
+            }
+            else if (portSet == false) {
+                port = (uint16_t) atoi(argv[i]);
+                portSet = true;
+            }
+            else if (localIpSet == false) {
+                localIp = argv[i];
+                localIpSet = true;
+            }
+            else if (localPortSet == false) {
+                localPort = atoi(argv[i]);
+                localPortSet = true;
+            }
+        }
+    }
 
     printf("=== CS104 IEC 62351-5 A-profile debug client ===\n");
     printf("Connecting to: %s:%u\n", ip, port);
@@ -231,10 +311,12 @@ main(int argc, char** argv)
     CS104_Connection conn = CS104_Connection_create(ip, port);
 
     CS104_SecurityConfig sec;
-    configureSecurity(&sec);
-    printSecurityConfig(&sec);
+    configureSecurity(&sec, useStaticKeys);
+    printSecurityConfig(&sec, useStaticKeys);
+    printf("[CLIENT] %s\n", useStaticKeys ? "Static session keys preloaded (handshake optional)"
+                                           : "ALS handshake enabled; expect E1-E4 control frames");
 
-    CS104_CertConfig cert = { .localCertificateVerified = true, .peerCertificateVerified = true };
+    CS104_CertConfig cert = buildCertConfig(localCertPath, peerCertPath);
     CS104_RoleConfig role = { .rolesAvailable = true };
 
     CS104_Connection_setSecurityConfig(conn, &sec, &cert, &role);
