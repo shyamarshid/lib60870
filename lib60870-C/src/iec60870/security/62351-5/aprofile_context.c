@@ -251,6 +251,14 @@ generateRandomBytes(uint8_t* out, size_t length)
     return (mbedtls_ctr_drbg_random(&drbg_ctx, out, length) == 0);
 }
 
+static int
+generateRandomBytesMbedtls(void* randomCtx, unsigned char* out, size_t length)
+{
+    (void)randomCtx;
+
+    return generateRandomBytes(out, length) ? 0 : MBEDTLS_ERR_ENTROPY_SOURCE_FAILED;
+}
+
 static void
 fallbackDeterministicKey(uint8_t* keyBuf, size_t length)
 {
@@ -273,7 +281,7 @@ ensureEcdhInitialized(AProfileContext ctx)
 
     mbedtls_ecdh_init(&ctx->ecdhCtx);
 
-    if (mbedtls_ecp_group_load(&ctx->ecdhCtx.grp, MBEDTLS_ECP_DP_SECP256R1) != 0)
+    if (mbedtls_ecdh_setup(&ctx->ecdhCtx, MBEDTLS_ECP_DP_SECP256R1) != 0)
     {
         mbedtls_ecdh_free(&ctx->ecdhCtx);
         return false;
@@ -666,13 +674,9 @@ encodeAssociationRequest(AProfileContext ctx)
     if (!generateRandomBytes(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE))
         fallbackDeterministicKey(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
 
-    if (mbedtls_ecdh_gen_public(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.d, &ctx->ecdhCtx.Q, generateRandomBytes, NULL) != 0)
-        return false;
-
     uint8_t pub[MBEDTLS_ECP_MAX_PT_LEN];
     size_t pubLen = 0;
-    if (mbedtls_ecp_point_write_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &pubLen, pub,
-                                       sizeof(pub)) != 0)
+    if (mbedtls_ecdh_make_public(&ctx->ecdhCtx, &pubLen, pub, sizeof(pub), generateRandomBytesMbedtls, NULL) != 0)
         return false;
 
     uint8_t buf[APROFILE_MAX_CONTROL_PDU];
@@ -709,22 +713,18 @@ encodeAssociationResponse(AProfileContext ctx, const uint8_t* peerPub, size_t pe
     if (!generateRandomBytes(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE))
         fallbackDeterministicKey(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
 
-    if (mbedtls_ecdh_gen_public(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.d, &ctx->ecdhCtx.Q, generateRandomBytes, NULL) != 0)
+    uint8_t responderPub[MBEDTLS_ECP_MAX_PT_LEN];
+    size_t responderPubLen = 0;
+    if (mbedtls_ecdh_make_public(&ctx->ecdhCtx, &responderPubLen, responderPub, sizeof(responderPub),
+                                 generateRandomBytesMbedtls, NULL) != 0)
         return false;
 
-    if (mbedtls_ecp_point_read_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Qp, peerPub, peerPubLen) != 0)
+    if (mbedtls_ecdh_read_public(&ctx->ecdhCtx, peerPub, peerPubLen) != 0)
         return false;
 
     uint8_t shared[64];
     size_t sharedLen = 0;
-    if (mbedtls_ecdh_compute_shared(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.z, &ctx->ecdhCtx.Qp, &ctx->ecdhCtx.d,
-                                    generateRandomBytes, NULL) != 0)
-        return false;
-
-    sharedLen = (ctx->ecdhCtx.grp.nbits + 7) / 8;
-    if (sharedLen > sizeof(shared))
-        return false;
-    if (mbedtls_mpi_write_binary(&ctx->ecdhCtx.z, shared, sharedLen) != 0)
+    if (mbedtls_ecdh_calc_secret(&ctx->ecdhCtx, &sharedLen, shared, sizeof(shared), generateRandomBytesMbedtls, NULL) != 0)
         return false;
 
     uint8_t salt[APROFILE_ASSOC_NONCE_SIZE * 2];
@@ -736,12 +736,6 @@ encodeAssociationResponse(AProfileContext ctx, const uint8_t* peerPub, size_t pe
         return false;
 
     ctx->updateKeysSet = true;
-
-    uint8_t responderPub[MBEDTLS_ECP_MAX_PT_LEN];
-    size_t responderPubLen = 0;
-    if (mbedtls_ecp_point_write_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &responderPubLen,
-                                       responderPub, sizeof(responderPub)) != 0)
-        return false;
 
     uint8_t buf[APROFILE_MAX_CONTROL_PDU];
     size_t offset = 0;
@@ -820,18 +814,12 @@ processAssociationResponse(AProfileContext ctx, const uint8_t* buf, size_t len)
     if (!ensureEcdhInitialized(ctx))
         return false;
 
-    if (mbedtls_ecp_point_read_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Qp, peerPub, peerPubLen) != 0)
+    if (mbedtls_ecdh_read_public(&ctx->ecdhCtx, peerPub, peerPubLen) != 0)
         return false;
 
     uint8_t shared[64];
-    size_t sharedLen = (ctx->ecdhCtx.grp.nbits + 7) / 8;
-    if (sharedLen > sizeof(shared))
-        return false;
-    if (mbedtls_ecdh_compute_shared(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.z, &ctx->ecdhCtx.Qp, &ctx->ecdhCtx.d,
-                                    generateRandomBytes, NULL) != 0)
-        return false;
-
-    if (mbedtls_mpi_write_binary(&ctx->ecdhCtx.z, shared, sharedLen) != 0)
+    size_t sharedLen = 0;
+    if (mbedtls_ecdh_calc_secret(&ctx->ecdhCtx, &sharedLen, shared, sizeof(shared), generateRandomBytesMbedtls, NULL) != 0)
         return false;
 
     uint8_t salt[APROFILE_ASSOC_NONCE_SIZE * 2];
