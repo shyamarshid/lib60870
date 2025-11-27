@@ -29,6 +29,11 @@ extern "C" {
 
 #include "aprofile_context.h"
 
+#if (CONFIG_CS104_APROFILE == 1)
+struct mbedtls_x509_crt;
+struct mbedtls_pk_context;
+#endif
+
 typedef struct sCS104_Connection* CS104_Connection;
 typedef struct sCS104_Slave* CS104_Slave;
 
@@ -52,6 +57,12 @@ typedef struct
 {
     bool localCertificateVerified;
     bool peerCertificateVerified;
+#if (CONFIG_CS104_APROFILE == 1)
+    /* Optional mbedTLS credentials already parsed in memory */
+    const struct mbedtls_x509_crt* localCertificate;
+    const struct mbedtls_pk_context* localPrivateKey;
+    const struct mbedtls_x509_crt* peerCertificate;
+#endif
 } CS104_CertConfig;
 
 typedef struct

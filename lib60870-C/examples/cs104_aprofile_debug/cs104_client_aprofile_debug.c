@@ -11,6 +11,51 @@
 #include "hal_time.h"
 #include "lib60870_config.h"
 
+#include "mbedtls/pk.h"
+#include "mbedtls/x509_crt.h"
+
+typedef struct {
+    mbedtls_x509_crt local_crt;
+    mbedtls_pk_context local_key;
+    mbedtls_x509_crt peer_crt;
+    bool have_local;
+    bool have_peer;
+} MbedCreds;
+
+static MbedCreds creds;
+
+static void
+init_creds(void)
+{
+    mbedtls_x509_crt_init(&creds.local_crt);
+    mbedtls_x509_crt_init(&creds.peer_crt);
+    mbedtls_pk_init(&creds.local_key);
+}
+
+static bool
+load_local_pair(const char* crt, const char* key)
+{
+    if ((crt == NULL) || (key == NULL))
+        return false;
+
+    int rc1 = mbedtls_x509_crt_parse_file(&creds.local_crt, crt);
+    int rc2 = mbedtls_pk_parse_keyfile(&creds.local_key, key, NULL);
+
+    creds.have_local = (rc1 == 0) && (rc2 == 0);
+    return creds.have_local;
+}
+
+static bool
+load_peer_crt(const char* crt)
+{
+    if (crt == NULL)
+        return false;
+
+    int rc = mbedtls_x509_crt_parse_file(&creds.peer_crt, crt);
+    creds.have_peer = (rc == 0);
+    return creds.have_peer;
+}
+
 static const char*
 getDpaName(AProfileDpaAlgorithm algo)
 {
@@ -69,21 +114,6 @@ static const uint8_t UPDATE_ENC_KEY[APROFILE_SESSION_KEY_LENGTH] = {
     0xD8, 0xD9, 0xDA, 0xDB, 0xDC, 0xDD, 0xDE, 0xDF
 };
 
-static bool
-fileExists(const char* path)
-{
-    if (path == NULL)
-        return false;
-
-    FILE* f = fopen(path, "rb");
-
-    if (f == NULL)
-        return false;
-
-    fclose(f);
-    return true;
-}
-
 static void
 configureSecurity(CS104_SecurityConfig* sec, bool useStaticKeys)
 {
@@ -116,23 +146,32 @@ printSecurityConfig(const CS104_SecurityConfig* sec, bool usingStaticKeys)
 }
 
 static CS104_CertConfig
-buildCertConfig(const char* localCertPath, const char* peerCertPath)
+buildCertConfig(const char* localCertPath, const char* localKeyPath, const char* peerCertPath)
 {
-    CS104_CertConfig cert = { .localCertificateVerified = true, .peerCertificateVerified = true };
+    CS104_CertConfig cert = {0};
 
-    if (localCertPath) {
-        bool exists = fileExists(localCertPath);
+    if (localCertPath && localKeyPath) {
+        bool loaded = load_local_pair(localCertPath, localKeyPath);
+        cert.localCertificateVerified = loaded;
+        cert.localCertificate = loaded ? &creds.local_crt : NULL;
+        cert.localPrivateKey = loaded ? &creds.local_key : NULL;
+
         printf("[CLIENT] Local certificate: %s (%s)\n", localCertPath,
-               exists ? "found" : "not found - verification skipped");
+               loaded ? "loaded" : "failed to load - verification skipped");
+        printf("[CLIENT] Local private key: %s (%s)\n", localKeyPath,
+               loaded ? "loaded" : "failed to load - verification skipped");
     }
     else {
-        printf("[CLIENT] Local certificate: none provided (verification skipped)\n");
+        printf("[CLIENT] Local certificate/key: not fully provided (verification skipped)\n");
     }
 
     if (peerCertPath) {
-        bool exists = fileExists(peerCertPath);
+        bool loaded = load_peer_crt(peerCertPath);
+        cert.peerCertificateVerified = loaded;
+        cert.peerCertificate = loaded ? &creds.peer_crt : NULL;
+
         printf("[CLIENT] Peer certificate: %s (%s)\n", peerCertPath,
-               exists ? "found" : "not found - verification skipped");
+               loaded ? "loaded" : "failed to load - verification skipped");
     }
     else {
         printf("[CLIENT] Peer certificate: none provided (verification skipped)\n");
@@ -144,7 +183,7 @@ buildCertConfig(const char* localCertPath, const char* peerCertPath)
 static void
 printClientUsage(void)
 {
-    printf("Usage: client_aprofile_debug [ip] [port] [localIp] [localPort] [--local-cert PATH] [--peer-cert PATH] [--static-keys]\n");
+    printf("Usage: client_aprofile_debug [ip] [port] [localIp] [localPort] [--local-cert PATH] [--local-key PATH] [--peer-cert PATH] [--static-keys]\n");
 }
 
 static void
@@ -264,6 +303,7 @@ main(int argc, char** argv)
     int localPort = -1;
     const char* localCertPath = NULL;
     const char* peerCertPath = NULL;
+    const char* localKeyPath = NULL;
     bool useStaticKeys = false;
 
     bool ipSet = false;
@@ -278,6 +318,9 @@ main(int argc, char** argv)
         }
         else if (strcmp(argv[i], "--local-cert") == 0 && (i + 1 < argc)) {
             localCertPath = argv[++i];
+        }
+        else if (strcmp(argv[i], "--local-key") == 0 && (i + 1 < argc)) {
+            localKeyPath = argv[++i];
         }
         else if (strcmp(argv[i], "--peer-cert") == 0 && (i + 1 < argc)) {
             peerCertPath = argv[++i];
@@ -305,6 +348,8 @@ main(int argc, char** argv)
         }
     }
 
+    init_creds();
+
     printf("=== CS104 IEC 62351-5 A-profile debug client ===\n");
     printf("Connecting to: %s:%u\n", ip, port);
 
@@ -316,7 +361,7 @@ main(int argc, char** argv)
     printf("[CLIENT] %s\n", useStaticKeys ? "Static session keys preloaded (handshake optional)"
                                            : "ALS handshake enabled; expect E1-E4 control frames");
 
-    CS104_CertConfig cert = buildCertConfig(localCertPath, peerCertPath);
+    CS104_CertConfig cert = buildCertConfig(localCertPath, localKeyPath, peerCertPath);
     CS104_RoleConfig role = { .rolesAvailable = true };
 
     CS104_Connection_setSecurityConfig(conn, &sec, &cert, &role);
