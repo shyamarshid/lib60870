@@ -29,11 +29,12 @@
 
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
+#include "mbedtls/gcm.h"
 #include "mbedtls/md.h"
 
 #define APROFILE_TAG_SECURE_DATA 0xF1
-#define APROFILE_HEADER_SIZE 7 /* tag (1) + DSQ (4) + ASDU length (2) */
-#define APROFILE_MAC_SIZE 16 /* HMAC-SHA-256 truncated for 104/TCP */
+#define APROFILE_HEADER_SIZE 11 /* tag (1) + DSQ (4) + AIM (2) + AIS (2) + ASDU length (2) */
+#define APROFILE_MAC_SIZE 16 /* Integrity tag size for GCM or truncated MAC */
 
 /*
  * This implementation provides a hardened, self-contained version of the
@@ -50,12 +51,17 @@ struct sAProfileContext
     bool startDtSeen;
     bool sessionKeysSet;
     bool rekeyRequested;
+    uint16_t aim;
+    uint16_t ais;
     uint32_t dsqOut;
     uint32_t dsqInExpected;
     uint32_t sentMessages;
     uint64_t sessionKeyBirthMs;
+    AProfileDpaAlgorithm algorithm;
+    AProfileTelemetry telemetry;
     uint8_t sessionKeyOutbound[APROFILE_SESSION_KEY_LENGTH];
     uint8_t sessionKeyInbound[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t inboundBuffer[IEC60870_5_104_MAX_ASDU_LENGTH];
 };
 
 static mbedtls_entropy_context entropy_ctx;
@@ -133,18 +139,176 @@ shouldRequestRekey(AProfileContext ctx)
     return false;
 }
 
-static bool
-calculateMac(const uint8_t* key, const uint8_t* data, size_t dataLen, uint8_t outMac[APROFILE_MAC_SIZE])
+static const mbedtls_md_info_t*
+selectMac(AProfileDpaAlgorithm algorithm)
 {
-    const mbedtls_md_info_t* md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    switch (algorithm)
+    {
+    case APROFILE_DPA_HMAC_SHA256:
+        return mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+#ifdef MBEDTLS_MD_SHA3_256
+    case APROFILE_DPA_HMAC_SHA3_256:
+        return mbedtls_md_info_from_type(MBEDTLS_MD_SHA3_256);
+#endif
+#ifdef MBEDTLS_MD_BLAKE2S_256
+    case APROFILE_DPA_HMAC_BLAKE2S_256:
+        return mbedtls_md_info_from_type(MBEDTLS_MD_BLAKE2S_256);
+#endif
+    default:
+        return NULL;
+    }
+}
+
+static void
+deriveNonceFromHeader(const uint8_t* header, size_t headerLen, uint8_t nonce[12])
+{
+    memset(nonce, 0, 12);
+
+    /* Use DSQ||AIM||AIS as nonce input to guarantee monotonicity */
+    size_t usable = (headerLen > 1) ? (headerLen - 1) : 0;
+    if (usable > 12)
+        usable = 12;
+
+    memcpy(nonce, header + 1, usable);
+}
+
+static bool
+protectPayload(AProfileContext ctx, const uint8_t* key, const uint8_t* header, size_t headerLen,
+               const uint8_t* plaintext, size_t plaintextLen, uint8_t* outPayload, uint8_t outMac[APROFILE_MAC_SIZE])
+{
+    if (ctx->algorithm == APROFILE_DPA_AES256_GCM)
+    {
+        mbedtls_gcm_context gcm;
+        mbedtls_gcm_init(&gcm);
+
+        uint8_t nonce[12];
+        deriveNonceFromHeader(header, headerLen, nonce);
+
+        int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
+        if (ret == 0)
+        {
+            ret = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plaintextLen, nonce, sizeof(nonce), header,
+                                            headerLen, plaintext, outPayload, APROFILE_MAC_SIZE, outMac);
+        }
+
+        mbedtls_gcm_free(&gcm);
+
+        return (ret == 0);
+    }
+
+    const mbedtls_md_info_t* md_info = selectMac(ctx->algorithm);
     if (md_info == NULL)
         return false;
 
+    mbedtls_md_context_t md_ctx;
+    mbedtls_md_init(&md_ctx);
+
+    if (mbedtls_md_setup(&md_ctx, md_info, 1) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    if (mbedtls_md_hmac_starts(&md_ctx, key, APROFILE_SESSION_KEY_LENGTH) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    if (mbedtls_md_hmac_update(&md_ctx, header, headerLen) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    if (mbedtls_md_hmac_update(&md_ctx, plaintext, plaintextLen) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
     uint8_t fullMac[MBEDTLS_MD_MAX_SIZE];
-    if (mbedtls_md_hmac(md_info, key, APROFILE_SESSION_KEY_LENGTH, data, dataLen, fullMac) != 0)
+    if (mbedtls_md_hmac_finish(&md_ctx, fullMac) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    mbedtls_md_free(&md_ctx);
+
+    memcpy(outPayload, plaintext, plaintextLen);
+    memcpy(outMac, fullMac, APROFILE_MAC_SIZE);
+    return true;
+}
+
+static bool
+validateAndDecryptPayload(AProfileContext ctx, const uint8_t* key, const uint8_t* header, size_t headerLen,
+                          const uint8_t* cipherPayload, size_t payloadLen, const uint8_t* mac,
+                          uint8_t* outPlaintext)
+{
+    if (ctx->algorithm == APROFILE_DPA_AES256_GCM)
+    {
+        mbedtls_gcm_context gcm;
+        mbedtls_gcm_init(&gcm);
+
+        uint8_t nonce[12];
+        deriveNonceFromHeader(header, headerLen, nonce);
+
+        int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
+        if (ret == 0)
+        {
+            ret = mbedtls_gcm_auth_decrypt(&gcm, payloadLen, nonce, sizeof(nonce), header, headerLen, mac,
+                                           APROFILE_MAC_SIZE, cipherPayload, outPlaintext);
+        }
+
+        mbedtls_gcm_free(&gcm);
+        return (ret == 0);
+    }
+
+    const mbedtls_md_info_t* md_info = selectMac(ctx->algorithm);
+    if (md_info == NULL)
         return false;
 
-    memcpy(outMac, fullMac, APROFILE_MAC_SIZE);
+    mbedtls_md_context_t md_ctx;
+    mbedtls_md_init(&md_ctx);
+
+    if (mbedtls_md_setup(&md_ctx, md_info, 1) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    if (mbedtls_md_hmac_starts(&md_ctx, key, APROFILE_SESSION_KEY_LENGTH) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    if (mbedtls_md_hmac_update(&md_ctx, header, headerLen) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    if (mbedtls_md_hmac_update(&md_ctx, cipherPayload, payloadLen) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    uint8_t fullMac[MBEDTLS_MD_MAX_SIZE];
+    if (mbedtls_md_hmac_finish(&md_ctx, fullMac) != 0)
+    {
+        mbedtls_md_free(&md_ctx);
+        return false;
+    }
+
+    mbedtls_md_free(&md_ctx);
+
+    if (memcmp(fullMac, mac, APROFILE_MAC_SIZE) != 0)
+        return false;
+
+    memcpy(outPlaintext, cipherPayload, payloadLen);
     return true;
 }
 
@@ -165,19 +329,26 @@ wrapPayload(AProfileContext ctx, T104Frame frame)
     uint8_t* frameBuffer = T104Frame_getBuffer((Frame)frame);
     const uint8_t* asduStart = frameBuffer + IEC60870_5_104_APCI_LENGTH;
 
-    memcpy(securePayload + APROFILE_HEADER_SIZE, asduStart, (size_t)asduLength);
-
     securePayload[0] = APROFILE_TAG_SECURE_DATA;
     securePayload[1] = (uint8_t)((ctx->dsqOut >> 24) & 0xffu);
     securePayload[2] = (uint8_t)((ctx->dsqOut >> 16) & 0xffu);
     securePayload[3] = (uint8_t)((ctx->dsqOut >> 8) & 0xffu);
     securePayload[4] = (uint8_t)(ctx->dsqOut & 0xffu);
 
-    securePayload[5] = (uint8_t)((asduLength >> 8) & 0xffu);
-    securePayload[6] = (uint8_t)(asduLength & 0xffu);
+    securePayload[5] = (uint8_t)((ctx->aim >> 8) & 0xffu);
+    securePayload[6] = (uint8_t)(ctx->aim & 0xffu);
+    securePayload[7] = (uint8_t)((ctx->ais >> 8) & 0xffu);
+    securePayload[8] = (uint8_t)(ctx->ais & 0xffu);
+
+    securePayload[9] = (uint8_t)((asduLength >> 8) & 0xffu);
+    securePayload[10] = (uint8_t)(asduLength & 0xffu);
+
+    memcpy(securePayload + APROFILE_HEADER_SIZE, asduStart, (size_t)asduLength);
 
     uint8_t mac[APROFILE_MAC_SIZE];
-    if (!calculateMac(ctx->sessionKeyOutbound, securePayload, (size_t)(APROFILE_HEADER_SIZE + asduLength), mac))
+    if (!protectPayload(ctx, ctx->sessionKeyOutbound, securePayload, APROFILE_HEADER_SIZE,
+                       securePayload + APROFILE_HEADER_SIZE, (size_t)asduLength,
+                       securePayload + APROFILE_HEADER_SIZE, mac))
         return -1;
 
     memcpy(securePayload + APROFILE_HEADER_SIZE + asduLength, mac, APROFILE_MAC_SIZE);
@@ -204,6 +375,10 @@ AProfile_create(void)
     {
         ctx->dsqOut = 1;
         ctx->dsqInExpected = 1;
+        ctx->aim = 0;
+        ctx->ais = 0;
+        ctx->algorithm = APROFILE_DPA_HMAC_SHA256;
+        memset(&ctx->telemetry, 0, sizeof(ctx->telemetry));
         initializeSessionKeys(ctx);
     }
 
@@ -218,6 +393,73 @@ AProfile_destroy(AProfileContext ctx)
 {
     if (ctx)
         GLOBAL_FREEMEM(ctx);
+}
+
+bool
+AProfile_setAssociationIds(AProfileContext ctx, uint16_t aim, uint16_t ais)
+{
+    if (ctx == NULL)
+        return false;
+
+    ctx->aim = aim;
+    ctx->ais = ais;
+    return true;
+}
+
+bool
+AProfile_getAssociationIds(AProfileContext ctx, uint16_t* aim, uint16_t* ais)
+{
+    if (ctx == NULL)
+        return false;
+
+    if (aim)
+        *aim = ctx->aim;
+    if (ais)
+        *ais = ctx->ais;
+
+    return true;
+}
+
+bool
+AProfile_setDpaAlgorithm(AProfileContext ctx, AProfileDpaAlgorithm algorithm)
+{
+    if (ctx == NULL)
+        return false;
+
+    if ((algorithm == APROFILE_DPA_AES256_GCM) || (selectMac(algorithm) != NULL))
+    {
+        ctx->algorithm = algorithm;
+        return true;
+    }
+
+    return false;
+}
+
+AProfileDpaAlgorithm
+AProfile_getDpaAlgorithm(AProfileContext ctx)
+{
+    if (ctx == NULL)
+        return APROFILE_DPA_HMAC_SHA256;
+
+    return ctx->algorithm;
+}
+
+void
+AProfile_getTelemetry(AProfileContext ctx, AProfileTelemetry* telemetryOut)
+{
+    if ((ctx == NULL) || (telemetryOut == NULL))
+        return;
+
+    *telemetryOut = ctx->telemetry;
+}
+
+void
+AProfile_clearTelemetry(AProfileContext ctx)
+{
+    if (ctx == NULL)
+        return;
+
+    memset(&ctx->telemetry, 0, sizeof(ctx->telemetry));
 }
 
 bool
@@ -328,6 +570,7 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
     {
         *out = in;
         *outSize = inSize;
+        ctx->telemetry.controlFrames++;
         return APROFILE_PLAINTEXT;
     }
 
@@ -335,6 +578,7 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
     {
         *out = in;
         *outSize = inSize;
+        ctx->telemetry.controlFrames++;
         return APROFILE_PLAINTEXT;
     }
 
@@ -348,12 +592,43 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
 
     uint32_t receivedDsq = ((uint32_t)in[1] << 24) | ((uint32_t)in[2] << 16) |
                            ((uint32_t)in[3] << 8) | (uint32_t)in[4];
-    int encodedAsduLen = ((int)in[5] << 8) | (int)in[6];
+    uint16_t receivedAim = ((uint16_t)in[5] << 8) | (uint16_t)in[6];
+    uint16_t receivedAis = ((uint16_t)in[7] << 8) | (uint16_t)in[8];
+    int encodedAsduLen = ((int)in[9] << 8) | (int)in[10];
 
     if ((encodedAsduLen < 0) || (APROFILE_HEADER_SIZE + encodedAsduLen + APROFILE_MAC_SIZE > inSize))
     {
         *out = NULL;
         *outSize = 0;
+        ctx->telemetry.secureRejected++;
+        ctx->telemetry.controlFrames++;
+        return APROFILE_CTRL_MSG;
+    }
+
+    if (encodedAsduLen > IEC60870_5_104_MAX_ASDU_LENGTH)
+    {
+        *out = NULL;
+        *outSize = 0;
+        ctx->telemetry.secureRejected++;
+        ctx->telemetry.controlFrames++;
+        return APROFILE_CTRL_MSG;
+    }
+
+    if ((ctx->aim != 0) && (receivedAim != ctx->aim))
+    {
+        *out = NULL;
+        *outSize = 0;
+        ctx->telemetry.secureRejected++;
+        ctx->telemetry.controlFrames++;
+        return APROFILE_CTRL_MSG;
+    }
+
+    if ((ctx->ais != 0) && (receivedAis != ctx->ais))
+    {
+        *out = NULL;
+        *outSize = 0;
+        ctx->telemetry.secureRejected++;
+        ctx->telemetry.controlFrames++;
         return APROFILE_CTRL_MSG;
     }
 
@@ -361,29 +636,28 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
     {
         *out = NULL;
         *outSize = 0;
+        ctx->telemetry.replayRejected++;
+        ctx->telemetry.controlFrames++;
         return APROFILE_CTRL_MSG;
     }
 
     const int macOffset = APROFILE_HEADER_SIZE + encodedAsduLen;
-    uint8_t expectedMac[APROFILE_MAC_SIZE];
-    if (!calculateMac(ctx->sessionKeyInbound, in, (size_t)macOffset, expectedMac))
+    uint8_t* decrypted = ctx->inboundBuffer;
+    if (!validateAndDecryptPayload(ctx, ctx->sessionKeyInbound, in, APROFILE_HEADER_SIZE, in + APROFILE_HEADER_SIZE,
+                                   (size_t)encodedAsduLen, in + macOffset, decrypted))
     {
         *out = NULL;
         *outSize = 0;
-        return APROFILE_CTRL_MSG;
-    }
-
-    if (memcmp(expectedMac, in + macOffset, APROFILE_MAC_SIZE) != 0)
-    {
-        *out = NULL;
-        *outSize = 0;
+        ctx->telemetry.secureRejected++;
+        ctx->telemetry.controlFrames++;
         return APROFILE_CTRL_MSG;
     }
 
     ctx->dsqInExpected++;
 
-    *out = in + APROFILE_HEADER_SIZE;
+    *out = decrypted;
     *outSize = encodedAsduLen;
+    ctx->telemetry.secureAccepted++;
 
     return APROFILE_SECURE_DATA;
 #else
