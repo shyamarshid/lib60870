@@ -1972,6 +1972,14 @@ writeToSocket(MasterConnection self, uint8_t* buf, int size)
 #endif
 }
 
+#if (CONFIG_CS104_APROFILE == 1)
+static int
+sendMessage(MasterConnection self, uint8_t* message, int messageSize)
+{
+    return writeToSocket(self, message, messageSize);
+}
+#endif
+
 static int
 sendIMessage(MasterConnection self, uint8_t* buffer, int msgSize)
 {
