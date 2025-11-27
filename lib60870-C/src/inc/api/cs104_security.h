@@ -24,24 +24,39 @@
 extern "C" {
 #endif
 
+#include <stdbool.h>
 #include <stdint.h>
+
+#include "iec60870/security/62351-5/aprofile_context.h"
 
 typedef struct sCS104_Connection* CS104_Connection;
 typedef struct sCS104_Slave* CS104_Slave;
 
 typedef struct
 {
-    int dummy;
+    uint16_t aim;
+    uint16_t ais;
+    AProfileDpaAlgorithm dpaAlgorithm;
+    bool hasStaticSessionKeys;
+    uint8_t outboundSessionKey[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t inboundSessionKey[APROFILE_SESSION_KEY_LENGTH];
+    bool hasWrappedSessionKeys;
+    uint8_t wrappedOutboundSessionKey[APROFILE_SESSION_KEY_WRAP_LENGTH];
+    uint8_t wrappedInboundSessionKey[APROFILE_SESSION_KEY_WRAP_LENGTH];
+    bool hasUpdateKeys;
+    uint8_t authenticationUpdateKey[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t encryptionUpdateKey[APROFILE_SESSION_KEY_LENGTH];
 } CS104_SecurityConfig;
 
 typedef struct
 {
-    int dummy;
+    bool localCertificateVerified;
+    bool peerCertificateVerified;
 } CS104_CertConfig;
 
 typedef struct
 {
-    int dummy;
+    bool rolesAvailable;
 } CS104_RoleConfig;
 
 typedef enum

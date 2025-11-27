@@ -26,6 +26,7 @@
 typedef struct sAProfileContext* AProfileContext;
 
 #define APROFILE_SESSION_KEY_LENGTH 32
+#define APROFILE_SESSION_KEY_WRAP_LENGTH (APROFILE_SESSION_KEY_LENGTH + 8)
 
 typedef enum
 {
@@ -68,6 +69,12 @@ void AProfile_getTelemetry(AProfileContext ctx, AProfileTelemetry* telemetryOut)
 void AProfile_clearTelemetry(AProfileContext ctx);
 
 bool AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const uint8_t* inboundKey);
+bool AProfile_setUpdateKeys(AProfileContext ctx, const uint8_t* authKey, const uint8_t* encKey);
+bool AProfile_unwrapAndInstallSessionKeys(AProfileContext ctx, const uint8_t* wrappedOutbound,
+                                         size_t wrappedOutboundLen, const uint8_t* wrappedInbound,
+                                         size_t wrappedInboundLen);
+bool AProfile_markCertificatesVerified(AProfileContext ctx, bool localCertificateOk, bool peerCertificateOk);
+bool AProfile_forceLocalKeyRotation(AProfileContext ctx);
 void AProfile_resetCounters(AProfileContext ctx);
 
 /*
