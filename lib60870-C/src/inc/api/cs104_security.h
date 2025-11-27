@@ -27,7 +27,7 @@ extern "C" {
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "iec60870/security/62351-5/aprofile_context.h"
+#include "aprofile_context.h"
 
 typedef struct sCS104_Connection* CS104_Connection;
 typedef struct sCS104_Slave* CS104_Slave;

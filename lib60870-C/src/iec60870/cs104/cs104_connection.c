@@ -81,6 +81,8 @@ typedef struct
     int seqNo;
 } SentASDU;
 
+static void sendIMessageAndUpdateSentASDUs(CS104_Connection self, Frame frame);
+
 struct sCS104_Connection
 {
     char hostname[HOST_NAME_MAX + 1];
