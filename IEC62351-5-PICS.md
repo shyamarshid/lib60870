@@ -13,6 +13,8 @@ This document captures the current implementation coverage for the IEC 62351-5 A
 ## Data protection algorithms
 - Supported: HMAC-SHA-256 (truncated to 16 bytes), AES-256-GCM with 16-byte authentication tag.
 - Conditional: SHA3-256 and BLAKE2s-256 are selectable when the underlying mbedtls build exposes the respective digests (`MBEDTLS_MD_SHA3_256` / `MBEDTLS_MD_BLAKE2S_256`).
+- AES-GCM uses the Association Identifier (AIM||AIS) as Additional Data and pads DSQ into the nonce; MAC-based DPAs continue to
+  cover the secure header plus payload.
 
 ## Secure data fields and associated data
 - Secure PDUs encode DSQ, AIM, AIS, and ASDU length ahead of the ciphertext/plaintext payload. These header bytes are always included as AEAD associated data or HMAC input.
@@ -21,7 +23,7 @@ This document captures the current implementation coverage for the IEC 62351-5 A
 - The A-profile APIs expose AIM/AIS and key injection hooks; enabling security now requires the embedding application to assert successful certificate validation and role availability when calling `CS104_Connection_setSecurityConfig`, otherwise secure wrapping remains disabled.
 
 ## Security telemetry (IEC 62351-14)
-- Telemetry counters track accepted secure frames, MAC/AEAD validation failures, replay rejections, and control frames exposed to the application. See `AProfile_getTelemetry` and `AProfile_clearTelemetry`.
+- Telemetry counters track accepted secure frames, MAC/AEAD validation failures, replay rejections, plaintext drops (when security is required), and control frames exposed to the application. See `AProfile_getTelemetry` and `AProfile_clearTelemetry`.
 
 ## Configuration defaults
 - A-profile code is behind `CONFIG_CS104_APROFILE`. Default DPA algorithm: HMAC-SHA-256. Session key limits follow the existing build-time configuration knobs documented in `aprofile_context.c`.
@@ -30,7 +32,7 @@ This document captures the current implementation coverage for the IEC 62351-5 A
 
 ### Station Association and key hierarchy
 - Session keys are generated locally in `AProfile_create` without any Station Association exchange, X.509 validation, or HKDF/ECDH-derived update keys; enabling protection still depends on the caller to inject keys or request local generation before traffic flows.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L199-L236】
-- There is no support for Authentication/Encryption Update Keys, AES-256 key wrap, curve negotiation, or association identifiers within Additional Data beyond the bare AIM/AIS fields in secure PDUs.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L332-L345】
+- There is no support for Authentication/Encryption Update Keys, AES-256 key wrap negotiation, or curve selection during association; AAD now carries the Association Identifier for AEAD flows.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L330-L367】
 - Implementation guidance: add Station Association PDUs, mutual certificate verification, and ECDH+HKDF derivation of update keys; wrap per-direction session keys with AES-256-KW using the Encryption Update Key and authenticate the key-change messages with the Authentication Update Key before calling `AProfile_setSessionKeys`.
 
 ### Session Key Change procedure
@@ -46,9 +48,9 @@ This document captures the current implementation coverage for the IEC 62351-5 A
 - Implementation guidance: add the mandatory counter set defined in IEC 62351-14, persist them per association, and define an ASDU or information object mapping to export counters/events as required by the 104 profile.
 
 ### Data protection algorithm coverage
-- The implementation supports HMAC-SHA-256 with optional SHA3-256/BLAKE2s-256 and AES-256-GCM, but lacks the explicit DPA code negotiation, minimum tag length enforcement for serial profiles, and AEAD-associated-data construction that includes the full Association ID per the standard’s tables.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L142-L205】【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L332-L351】
+- The implementation supports HMAC-SHA-256 with optional SHA3-256/BLAKE2s-256 and AES-256-GCM, but lacks the explicit DPA code negotiation and minimum tag length enforcement for serial profiles; AES-GCM now follows AIM||AIS AAD with DSQ-derived nonces.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L142-L205】【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L330-L367】
 - Implementation guidance: surface DPA code negotiation during Station Association, validate that the selected algorithm matches the transport (e.g., 16-byte tag for 104/TCP), and ensure AEAD uses AIM||AIS as Additional Data and DSQ-derived nonces exactly per Annex B.
 
 ### Integration with the 104 state machine
-- Secure wrapping is enabled only after STARTDT and when session keys are present, but the library does not mandate running the association/key-change handshake before allowing plaintext ASDUs or enforcing rekey deadlines; STARTDT simply resets DSQ counters.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L512-L556】【F:lib60870-C/src/iec60870/cs104/cs104_connection.c†L777-L781】
+- Secure wrapping is enabled only after STARTDT and when session keys are present; plaintext ASDUs are dropped once an association is established to prevent downgrades.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L780-L833】【F:lib60870-C/src/iec60870/cs104/cs104_connection.c†L777-L781】
 - Implementation guidance: insert the Station Association and Session Key Change procedures after STARTDT before application traffic flows, and drop/alarms on plaintext ASDUs when the A-profile is required.
