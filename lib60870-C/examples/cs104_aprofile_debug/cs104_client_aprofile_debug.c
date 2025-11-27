@@ -1,12 +1,14 @@
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "cs101_information_objects.h"
 #include "cs104_connection.h"
 #include "cs104_security.h"
 #include "hal_thread.h"
+#include "hal_time.h"
 
 static const char*
 getDpaName(AProfileDpaAlgorithm algo)
@@ -139,12 +141,27 @@ asduReceivedHandler(void* parameter, int address, CS101_ASDU asdu)
 int
 main(int argc, char** argv)
 {
-    (void) argc;
-    (void) argv;
+    const char* ip = "localhost";
+    uint16_t port = IEC_60870_5_104_DEFAULT_PORT;
+    const char* localIp = NULL;
+    int localPort = -1;
+
+    if (argc > 1)
+        ip = argv[1];
+
+    if (argc > 2)
+        port = atoi(argv[2]);
+
+    if (argc > 3)
+        localIp = argv[3];
+
+    if (argc > 4)
+        localPort = atoi(argv[4]);
 
     printf("=== CS104 IEC 62351-5 A-profile debug client ===\n");
+    printf("Connecting to: %s:%u\n", ip, port);
 
-    CS104_Connection conn = CS104_Connection_create("127.0.0.1", 2404);
+    CS104_Connection conn = CS104_Connection_create(ip, port);
 
     CS104_SecurityConfig sec = {0};
     sec.aim = 0x1001;
@@ -163,6 +180,10 @@ main(int argc, char** argv)
     CS104_Connection_setConnectionHandler(conn, connectionHandler, NULL);
     CS104_Connection_setASDUReceivedHandler(conn, asduReceivedHandler, NULL);
     CS104_Connection_setRawMessageHandler(conn, rawMessageHandler, &sec);
+
+    /* optional bind to local IP address/interface */
+    if (localIp)
+        CS104_Connection_setLocalAddress(conn, localIp, localPort);
 
     if (!CS104_Connection_connect(conn)) {
         printf("Failed to connect to server\n");
@@ -189,6 +210,10 @@ main(int argc, char** argv)
     InformationObject_destroy(sc);
     CS104_Connection_sendASDU(conn, cmd);
     CS101_ASDU_destroy(cmd);
+
+    struct sCP56Time2a testTimestamp;
+    CP56Time2a_createFromMsTimestamp(&testTimestamp, Hal_getTimeInMs());
+    CS104_Connection_sendTestCommandWithTimestamp(conn, 1, 0x4938, &testTimestamp);
 
     for (int i = 0; i < 10; i++) {
         HalThread_sleep(1000);
