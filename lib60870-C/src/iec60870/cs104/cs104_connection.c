@@ -721,7 +721,17 @@ checkMessage(CS104_Connection self, uint8_t* buffer, int msgSize)
             AProfileKind kind =
                 AProfile_handleInPdu(self->sec, buffer + 6, msgSize - 6, &asduBuffer, &asduLength);
             if (kind == APROFILE_CTRL_MSG)
+            {
+                if (AProfile_hasPendingControl(self->sec))
+                {
+                    Frame ctrl = (Frame)T104Frame_create();
+                    if (AProfile_emitPendingControl(self->sec, (T104Frame)ctrl))
+                        sendIMessageAndUpdateSentASDUs(self, ctrl);
+                    else
+                        T104Frame_destroy((T104Frame)ctrl);
+                }
                 goto exit_function;
+            }
         }
 #endif
 

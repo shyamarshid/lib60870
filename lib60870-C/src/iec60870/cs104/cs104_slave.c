@@ -2950,7 +2950,21 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
                     AProfileKind kind =
                         AProfile_handleInPdu(self->sec, buffer + 6, msgSize - 6, &asduBuf, &asduLen);
                     if (kind == APROFILE_CTRL_MSG)
+                    {
+                        if (AProfile_hasPendingControl(self->sec))
+                        {
+                            Frame ctrlFrame = (Frame)T104Frame_create();
+                            if (AProfile_emitPendingControl(self->sec, (T104Frame)ctrlFrame))
+                            {
+                                T104Frame_prepareToSend((T104Frame)ctrlFrame, self->sendCount, self->receiveCount);
+                                sendMessage(self, T104Frame_getBuffer(ctrlFrame), T104Frame_getMsgSize(ctrlFrame));
+                                self->sendCount = (self->sendCount + 1) % 32768;
+                            }
+                            else
+                                T104Frame_destroy((T104Frame)ctrlFrame);
+                        }
                         return true;
+                    }
                 }
 #endif
 
