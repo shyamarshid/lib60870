@@ -1804,8 +1804,14 @@ CS104_Slave_setSecurityConfig(CS104_Slave self, const CS104_SecurityConfig* sec,
 
     for (int i = 0; i < CONFIG_CS104_MAX_CLIENT_CONNECTIONS; i++)
     {
-        if (self->masterConnections[i] && self->masterConnections[i]->sec == NULL)
-            self->masterConnections[i]->sec = AProfile_create();
+        if (self->masterConnections[i])
+        {
+            if (self->masterConnections[i]->sec == NULL)
+                self->masterConnections[i]->sec = AProfile_create();
+
+            CS104_Connection_setSecurityConfig(self->masterConnections[i], &self->securityConfig, &self->certConfig,
+                                               &self->roleConfig);
+        }
     }
 }
 #else

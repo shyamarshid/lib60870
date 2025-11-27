@@ -1229,14 +1229,47 @@ void
 CS104_Connection_setSecurityConfig(CS104_Connection self, const CS104_SecurityConfig* sec,
                                    const CS104_CertConfig* cert, const CS104_RoleConfig* role)
 {
-    (void)sec;
-    (void)cert;
     (void)role;
 
     if (self->sec)
+    {
         AProfile_destroy(self->sec);
+        self->sec = NULL;
+    }
+
+    if (sec == NULL)
+        return;
 
     self->sec = AProfile_create();
+
+    if (self->sec == NULL)
+        return;
+
+    if ((sec->aim != 0) || (sec->ais != 0))
+        AProfile_setAssociationIds(self->sec, sec->aim, sec->ais);
+
+    if (AProfile_setDpaAlgorithm(self->sec, sec->dpaAlgorithm) == false)
+        AProfile_setDpaAlgorithm(self->sec, APROFILE_DPA_HMAC_SHA256);
+
+    if (cert)
+        AProfile_markCertificatesVerified(self->sec, cert->localCertificateVerified, cert->peerCertificateVerified);
+
+    if (sec->hasUpdateKeys)
+        AProfile_setUpdateKeys(self->sec, sec->authenticationUpdateKey, sec->encryptionUpdateKey);
+
+    if (sec->hasWrappedSessionKeys)
+    {
+        AProfile_unwrapAndInstallSessionKeys(self->sec, sec->wrappedOutboundSessionKey, APROFILE_SESSION_KEY_WRAP_LENGTH,
+                                             sec->wrappedInboundSessionKey, APROFILE_SESSION_KEY_WRAP_LENGTH);
+    }
+    else if (sec->hasStaticSessionKeys)
+    {
+        AProfile_setSessionKeys(self->sec, sec->outboundSessionKey, sec->inboundSessionKey);
+    }
+    else if (sec->hasUpdateKeys)
+    {
+        AProfile_forceLocalKeyRotation(self->sec);
+    }
 }
 
 void

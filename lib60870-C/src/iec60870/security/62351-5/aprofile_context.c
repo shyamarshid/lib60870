@@ -27,6 +27,7 @@
 #include <stddef.h>
 #include <string.h>
 
+#include "mbedtls/aes.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
 #include "mbedtls/gcm.h"
@@ -51,6 +52,9 @@ struct sAProfileContext
     bool startDtSeen;
     bool sessionKeysSet;
     bool rekeyRequested;
+    bool associationEstablished;
+    bool certificatesVerified;
+    bool updateKeysSet;
     uint16_t aim;
     uint16_t ais;
     uint32_t dsqOut;
@@ -59,6 +63,8 @@ struct sAProfileContext
     uint64_t sessionKeyBirthMs;
     AProfileDpaAlgorithm algorithm;
     AProfileTelemetry telemetry;
+    uint8_t authUpdateKey[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t encUpdateKey[APROFILE_SESSION_KEY_LENGTH];
     uint8_t sessionKeyOutbound[APROFILE_SESSION_KEY_LENGTH];
     uint8_t sessionKeyInbound[APROFILE_SESSION_KEY_LENGTH];
     uint8_t inboundBuffer[IEC60870_5_104_MAX_ASDU_LENGTH];
@@ -67,6 +73,115 @@ struct sAProfileContext
 static mbedtls_entropy_context entropy_ctx;
 static mbedtls_ctr_drbg_context drbg_ctx;
 static bool rng_initialized = false;
+
+static const uint8_t defaultAesKwIv[8] = {0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u};
+
+static bool
+aesKwWrap(const uint8_t* kek, const uint8_t* plaintext, size_t plaintextLen, uint8_t* wrapped, size_t wrappedLen)
+{
+    const size_t n = plaintextLen / 8;
+
+    if ((plaintextLen % 8 != 0) || (n < 2) || (wrappedLen < plaintextLen + 8))
+        return false;
+
+    uint8_t a[8];
+    memcpy(a, defaultAesKwIv, sizeof(a));
+
+    uint8_t r[6][8];
+    if (n > 6)
+        return false;
+
+    for (size_t i = 0; i < n; i++)
+        memcpy(r[i], plaintext + (8 * i), 8);
+
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    if (mbedtls_aes_setkey_enc(&aes, kek, 256) != 0)
+    {
+        mbedtls_aes_free(&aes);
+        return false;
+    }
+
+    for (size_t j = 0; j <= 5; j++)
+    {
+        for (size_t i = 0; i < n; i++)
+        {
+            uint8_t block[16];
+            memcpy(block, a, 8);
+            memcpy(block + 8, r[i], 8);
+
+            mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_ENCRYPT, block, block);
+
+            uint64_t t = (uint64_t)(n * j + (i + 1));
+
+            for (int k = 0; k < 8; k++)
+                a[k] = block[k] ^ ((t >> (56 - (8 * k))) & 0xffu);
+
+            memcpy(r[i], block + 8, 8);
+        }
+    }
+
+    mbedtls_aes_free(&aes);
+
+    memcpy(wrapped, a, 8);
+    for (size_t i = 0; i < n; i++)
+        memcpy(wrapped + 8 + (8 * i), r[i], 8);
+
+    return true;
+}
+
+static bool
+aesKwUnwrap(const uint8_t* kek, const uint8_t* wrapped, size_t wrappedLen, uint8_t* plaintext, size_t plaintextLen)
+{
+    const size_t n = plaintextLen / 8;
+
+    if ((plaintextLen % 8 != 0) || (wrappedLen != plaintextLen + 8) || (n < 2) || (n > 6))
+        return false;
+
+    uint8_t a[8];
+    memcpy(a, wrapped, 8);
+
+    uint8_t r[6][8];
+    for (size_t i = 0; i < n; i++)
+        memcpy(r[i], wrapped + 8 + (8 * i), 8);
+
+    mbedtls_aes_context aes;
+    mbedtls_aes_init(&aes);
+    if (mbedtls_aes_setkey_dec(&aes, kek, 256) != 0)
+    {
+        mbedtls_aes_free(&aes);
+        return false;
+    }
+
+    for (int j = 5; j >= 0; j--)
+    {
+        for (int i = (int)n - 1; i >= 0; i--)
+        {
+            uint64_t t = (uint64_t)(n * j + (i + 1));
+            uint8_t block[16];
+
+            for (int k = 0; k < 8; k++)
+                block[k] = (uint8_t)(a[k] ^ ((t >> (56 - (8 * k))) & 0xffu));
+
+            memcpy(block + 8, r[i], 8);
+
+            mbedtls_aes_crypt_ecb(&aes, MBEDTLS_AES_DECRYPT, block, block);
+
+            memcpy(a, block, 8);
+            memcpy(r[i], block + 8, 8);
+        }
+    }
+
+    mbedtls_aes_free(&aes);
+
+    if (memcmp(a, defaultAesKwIv, sizeof(a)) != 0)
+        return false;
+
+    for (size_t i = 0; i < n; i++)
+        memcpy(plaintext + (8 * i), r[i], 8);
+
+    return true;
+}
 
 static bool
 generateRandomBytes(uint8_t* out, size_t length)
@@ -118,6 +233,7 @@ initializeSessionKeys(AProfileContext ctx)
     ctx->sessionKeyBirthMs = Hal_getMonotonicTimeInMs();
     ctx->rekeyRequested = false;
     ctx->sentMessages = 0;
+    ctx->associationEstablished = true;
 }
 
 static bool
@@ -137,6 +253,37 @@ shouldRequestRekey(AProfileContext ctx)
         return true;
 
     return false;
+}
+
+static bool
+localSessionKeyChange(AProfileContext ctx)
+{
+    if ((ctx == NULL) || (ctx->updateKeysSet == false))
+        return false;
+
+    uint8_t newOutbound[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t newInbound[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t wrappedOutbound[APROFILE_SESSION_KEY_WRAP_LENGTH];
+    uint8_t wrappedInbound[APROFILE_SESSION_KEY_WRAP_LENGTH];
+
+    if (!generateRandomBytes(newOutbound, sizeof(newOutbound)))
+        fallbackDeterministicKey(newOutbound, sizeof(newOutbound));
+
+    if (!generateRandomBytes(newInbound, sizeof(newInbound)))
+        fallbackDeterministicKey(newInbound, sizeof(newInbound));
+
+    if (!aesKwWrap(ctx->encUpdateKey, newOutbound, sizeof(newOutbound), wrappedOutbound, sizeof(wrappedOutbound)))
+        return false;
+
+    if (!aesKwWrap(ctx->encUpdateKey, newInbound, sizeof(newInbound), wrappedInbound, sizeof(wrappedInbound)))
+        return false;
+
+    if (!AProfile_unwrapAndInstallSessionKeys(ctx, wrappedOutbound, sizeof(wrappedOutbound), wrappedInbound,
+                                             sizeof(wrappedInbound)))
+        return false;
+
+    ctx->telemetry.controlFrames++;
+    return true;
 }
 
 static const mbedtls_md_info_t*
@@ -379,7 +526,9 @@ AProfile_create(void)
         ctx->ais = 0;
         ctx->algorithm = APROFILE_DPA_HMAC_SHA256;
         memset(&ctx->telemetry, 0, sizeof(ctx->telemetry));
-        initializeSessionKeys(ctx);
+        ctx->associationEstablished = false;
+        ctx->certificatesVerified = false;
+        ctx->updateKeysSet = false;
     }
 
     return ctx;
@@ -474,8 +623,63 @@ AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const u
     ctx->sessionKeyBirthMs = Hal_getMonotonicTimeInMs();
     ctx->rekeyRequested = false;
     ctx->sentMessages = 0;
+    ctx->associationEstablished = true;
 
     return true;
+}
+
+bool
+AProfile_setUpdateKeys(AProfileContext ctx, const uint8_t* authKey, const uint8_t* encKey)
+{
+    if ((ctx == NULL) || (authKey == NULL) || (encKey == NULL))
+        return false;
+
+    memcpy(ctx->authUpdateKey, authKey, APROFILE_SESSION_KEY_LENGTH);
+    memcpy(ctx->encUpdateKey, encKey, APROFILE_SESSION_KEY_LENGTH);
+    ctx->updateKeysSet = true;
+
+    return true;
+}
+
+bool
+AProfile_unwrapAndInstallSessionKeys(AProfileContext ctx, const uint8_t* wrappedOutbound,
+                                     size_t wrappedOutboundLen, const uint8_t* wrappedInbound,
+                                     size_t wrappedInboundLen)
+{
+    if ((ctx == NULL) || (wrappedOutbound == NULL) || (wrappedInbound == NULL))
+        return false;
+
+    if ((wrappedOutboundLen != APROFILE_SESSION_KEY_WRAP_LENGTH) ||
+        (wrappedInboundLen != APROFILE_SESSION_KEY_WRAP_LENGTH) || (ctx->updateKeysSet == false))
+        return false;
+
+    uint8_t outboundKey[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t inboundKey[APROFILE_SESSION_KEY_LENGTH];
+
+    if (!aesKwUnwrap(ctx->encUpdateKey, wrappedOutbound, wrappedOutboundLen, outboundKey, sizeof(outboundKey)))
+        return false;
+
+    if (!aesKwUnwrap(ctx->encUpdateKey, wrappedInbound, wrappedInboundLen, inboundKey, sizeof(inboundKey)))
+        return false;
+
+    return AProfile_setSessionKeys(ctx, outboundKey, inboundKey);
+}
+
+bool
+AProfile_markCertificatesVerified(AProfileContext ctx, bool localCertificateOk, bool peerCertificateOk)
+{
+    if (ctx == NULL)
+        return false;
+
+    ctx->certificatesVerified = localCertificateOk && peerCertificateOk;
+    ctx->associationEstablished = ctx->certificatesVerified && ctx->sessionKeysSet;
+    return ctx->certificatesVerified;
+}
+
+bool
+AProfile_forceLocalKeyRotation(AProfileContext ctx)
+{
+    return localSessionKeyChange(ctx);
 }
 
 void
@@ -524,7 +728,7 @@ bool
 AProfile_ready(AProfileContext ctx)
 {
 #if (CONFIG_CS104_APROFILE == 1)
-    return (ctx != NULL) && ctx->startDtSeen && ctx->sessionKeysSet;
+    return (ctx != NULL) && ctx->startDtSeen && ctx->sessionKeysSet && ctx->associationEstablished;
 #else
     return false;
 #endif
@@ -537,11 +741,14 @@ AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame)
         return false;
 
 #if (CONFIG_CS104_APROFILE == 1)
-    if ((ctx->startDtSeen == false) || (ctx->sessionKeysSet == false))
+    if ((ctx->startDtSeen == false) || (ctx->sessionKeysSet == false) || (ctx->associationEstablished == false))
         return false;
 
     if (AProfile_requiresRekey(ctx))
-        return false;
+    {
+        if (!localSessionKeyChange(ctx))
+            return false;
+    }
 
     int result = wrapPayload(ctx, frame);
     if (result > 0)
