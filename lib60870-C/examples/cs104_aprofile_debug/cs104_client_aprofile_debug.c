@@ -224,9 +224,16 @@ rawMessageHandler(void* parameter, uint8_t* msg, int msgSize, bool sent)
     print_hex(msg, msgSize);
     printf("\n");
 
-    if (msgSize > 6 && msg[0] == 0x68) {
-        int payloadLen = msgSize - 6;
-        classifyApdu(msg + 6, payloadLen, sec);
+    if ((msgSize >= 2) && (msg[0] == 0x68)) {
+        int apduLen = msg[1];
+        int payloadLen = apduLen - 4; /* length field excludes start byte and length byte */
+
+        /* If reported length does not match observed bytes, flag it for debugging */
+        if ((apduLen + 2) != msgSize)
+            printf("[CLIENT] Warning: APDU length byte=%d but frame has %d bytes\n", apduLen, msgSize);
+
+        if (payloadLen > 0 && msgSize >= 6)
+            classifyApdu(msg + 6, payloadLen, sec);
     }
 }
 
