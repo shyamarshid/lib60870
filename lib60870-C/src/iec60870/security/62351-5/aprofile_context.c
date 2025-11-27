@@ -30,12 +30,24 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/entropy.h"
+#include "mbedtls/ecdh.h"
+#include "mbedtls/hkdf.h"
 #include "mbedtls/gcm.h"
 #include "mbedtls/md.h"
 
 #define APROFILE_TAG_SECURE_DATA 0xF1
+#define APROFILE_TAG_ASSOCIATION_REQUEST 0xE1
+#define APROFILE_TAG_ASSOCIATION_RESPONSE 0xE2
+#define APROFILE_TAG_SESSION_KEY_CHANGE_REQUEST 0xE3
+#define APROFILE_TAG_SESSION_KEY_CHANGE_RESPONSE 0xE4
+
+#define APROFILE_ASSOC_VERSION 0x01
+#define APROFILE_ASSOC_NONCE_SIZE 16
+#define APROFILE_CONTROL_MAC_SIZE 16
 #define APROFILE_HEADER_SIZE 11 /* tag (1) + DSQ (4) + AIM (2) + AIS (2) + ASDU length (2) */
 #define APROFILE_MAC_SIZE 16 /* Integrity tag size for GCM or truncated MAC */
+
+#define APROFILE_MAX_CONTROL_PDU 512
 
 /*
  * This implementation provides a hardened, self-contained version of the
@@ -52,10 +64,17 @@ struct sAProfileContext
     bool startDtSeen;
     bool sessionKeysSet;
     bool rekeyRequested;
+    bool associationInProgress;
+    bool awaitingAssociationResponse;
+    bool awaitingKeyChangeResponse;
     bool associationEstablished;
     bool certificatesVerified;
     bool rolesAuthorized;
     bool updateKeysSet;
+    bool ecdhInitialized;
+    bool hasPendingSessionKeys;
+    uint8_t pendingSessionKeyOutbound[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t pendingSessionKeyInbound[APROFILE_SESSION_KEY_LENGTH];
     uint16_t aim;
     uint16_t ais;
     uint32_t dsqOut;
@@ -68,6 +87,11 @@ struct sAProfileContext
     uint8_t encUpdateKey[APROFILE_SESSION_KEY_LENGTH];
     uint8_t sessionKeyOutbound[APROFILE_SESSION_KEY_LENGTH];
     uint8_t sessionKeyInbound[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t assocNonceLocal[APROFILE_ASSOC_NONCE_SIZE];
+    uint8_t assocNoncePeer[APROFILE_ASSOC_NONCE_SIZE];
+    uint8_t pendingControl[APROFILE_MAX_CONTROL_PDU];
+    size_t pendingControlLen;
+    mbedtls_ecdh_context ecdhCtx;
     uint8_t inboundBuffer[IEC60870_5_104_MAX_ASDU_LENGTH];
 };
 
@@ -84,6 +108,17 @@ updateAssociationState(AProfileContext ctx)
         return;
 
     ctx->associationEstablished = ctx->sessionKeysSet && ctx->certificatesVerified && ctx->rolesAuthorized;
+}
+
+static bool
+queueControlPdu(AProfileContext ctx, const uint8_t* data, size_t len)
+{
+    if ((ctx == NULL) || (data == NULL) || (len == 0) || (len > APROFILE_MAX_CONTROL_PDU))
+        return false;
+
+    memcpy(ctx->pendingControl, data, len);
+    ctx->pendingControlLen = len;
+    return true;
 }
 
 static bool
@@ -230,6 +265,50 @@ fallbackDeterministicKey(uint8_t* keyBuf, size_t length)
     }
 }
 
+static bool
+ensureEcdhInitialized(AProfileContext ctx)
+{
+    if (ctx->ecdhInitialized)
+        return true;
+
+    mbedtls_ecdh_init(&ctx->ecdhCtx);
+
+    if (mbedtls_ecp_group_load(&ctx->ecdhCtx.grp, MBEDTLS_ECP_DP_SECP256R1) != 0)
+    {
+        mbedtls_ecdh_free(&ctx->ecdhCtx);
+        return false;
+    }
+
+    ctx->ecdhInitialized = true;
+    return true;
+}
+
+static bool
+deriveUpdateKeysFromSecret(const uint8_t* secret, size_t secretLen, const uint8_t* salt, size_t saltLen, uint16_t aim,
+                           uint16_t ais, uint8_t* authOut, uint8_t* encOut)
+{
+    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (md == NULL)
+        return false;
+
+    uint8_t info[6];
+    info[0] = (uint8_t)((aim >> 8) & 0xffu);
+    info[1] = (uint8_t)(aim & 0xffu);
+    info[2] = (uint8_t)((ais >> 8) & 0xffu);
+    info[3] = (uint8_t)(ais & 0xffu);
+    info[4] = 'A';
+    info[5] = 'P';
+
+    uint8_t derived[APROFILE_SESSION_KEY_LENGTH * 2];
+    if (mbedtls_hkdf(md, salt, saltLen, secret, secretLen, info, sizeof(info), derived, sizeof(derived)) != 0)
+        return false;
+
+    memcpy(authOut, derived, APROFILE_SESSION_KEY_LENGTH);
+    memcpy(encOut, derived + APROFILE_SESSION_KEY_LENGTH, APROFILE_SESSION_KEY_LENGTH);
+
+    return true;
+}
+
 static void
 initializeSessionKeys(AProfileContext ctx)
 {
@@ -314,6 +393,38 @@ selectMac(AProfileDpaAlgorithm algorithm)
     default:
         return NULL;
     }
+}
+
+static bool
+hmacTruncated(const uint8_t* key, size_t keyLen, const uint8_t* data, size_t dataLen, uint8_t* macOut)
+{
+    const mbedtls_md_info_t* md = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (md == NULL)
+        return false;
+
+    mbedtls_md_context_t ctx;
+    mbedtls_md_init(&ctx);
+
+    if (mbedtls_md_setup(&ctx, md, 1) != 0)
+    {
+        mbedtls_md_free(&ctx);
+        return false;
+    }
+
+    bool ok = false;
+
+    if ((mbedtls_md_hmac_starts(&ctx, key, keyLen) == 0) && (mbedtls_md_hmac_update(&ctx, data, dataLen) == 0))
+    {
+        uint8_t full[MBEDTLS_MD_MAX_SIZE];
+        if (mbedtls_md_hmac_finish(&ctx, full) == 0)
+        {
+            memcpy(macOut, full, APROFILE_CONTROL_MAC_SIZE);
+            ok = true;
+        }
+    }
+
+    mbedtls_md_free(&ctx);
+    return ok;
 }
 
 static void
@@ -546,6 +657,294 @@ wrapPayload(AProfileContext ctx, T104Frame frame)
     return secureLength;
 }
 
+static bool
+encodeAssociationRequest(AProfileContext ctx)
+{
+    if (!ensureEcdhInitialized(ctx))
+        return false;
+
+    if (!generateRandomBytes(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE))
+        fallbackDeterministicKey(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
+
+    if (mbedtls_ecdh_gen_public(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.d, &ctx->ecdhCtx.Q, generateRandomBytes, NULL) != 0)
+        return false;
+
+    uint8_t pub[MBEDTLS_ECP_MAX_PT_LEN];
+    size_t pubLen = 0;
+    if (mbedtls_ecp_point_write_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &pubLen, pub,
+                                       sizeof(pub)) != 0)
+        return false;
+
+    uint8_t buf[APROFILE_MAX_CONTROL_PDU];
+    size_t offset = 0;
+    buf[offset++] = APROFILE_TAG_ASSOCIATION_REQUEST;
+    buf[offset++] = APROFILE_ASSOC_VERSION;
+    buf[offset++] = (uint8_t)((ctx->aim >> 8) & 0xffu);
+    buf[offset++] = (uint8_t)(ctx->aim & 0xffu);
+    buf[offset++] = (uint8_t)((ctx->ais >> 8) & 0xffu);
+    buf[offset++] = (uint8_t)(ctx->ais & 0xffu);
+    buf[offset++] = (uint8_t)ctx->algorithm;
+    buf[offset++] = (uint8_t)pubLen;
+    memcpy(buf + offset, pub, pubLen);
+    offset += pubLen;
+    buf[offset++] = APROFILE_ASSOC_NONCE_SIZE;
+    memcpy(buf + offset, ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
+    offset += APROFILE_ASSOC_NONCE_SIZE;
+
+    ctx->associationInProgress = true;
+    ctx->awaitingAssociationResponse = true;
+    return queueControlPdu(ctx, buf, offset);
+}
+
+static bool
+encodeAssociationResponse(AProfileContext ctx, const uint8_t* peerPub, size_t peerPubLen, const uint8_t* peerNonce,
+                          size_t peerNonceLen)
+{
+    if ((peerPub == NULL) || (peerNonce == NULL) || (peerNonceLen != APROFILE_ASSOC_NONCE_SIZE))
+        return false;
+
+    if (!ensureEcdhInitialized(ctx))
+        return false;
+
+    if (!generateRandomBytes(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE))
+        fallbackDeterministicKey(ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
+
+    if (mbedtls_ecdh_gen_public(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.d, &ctx->ecdhCtx.Q, generateRandomBytes, NULL) != 0)
+        return false;
+
+    if (mbedtls_ecp_point_read_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Qp, peerPub, peerPubLen) != 0)
+        return false;
+
+    uint8_t shared[64];
+    size_t sharedLen = 0;
+    if (mbedtls_ecdh_compute_shared(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.z, &ctx->ecdhCtx.Qp, &ctx->ecdhCtx.d,
+                                    generateRandomBytes, NULL) != 0)
+        return false;
+
+    sharedLen = (ctx->ecdhCtx.grp.nbits + 7) / 8;
+    if (sharedLen > sizeof(shared))
+        return false;
+    if (mbedtls_mpi_write_binary(&ctx->ecdhCtx.z, shared, sharedLen) != 0)
+        return false;
+
+    uint8_t salt[APROFILE_ASSOC_NONCE_SIZE * 2];
+    memcpy(salt, peerNonce, APROFILE_ASSOC_NONCE_SIZE);
+    memcpy(salt + APROFILE_ASSOC_NONCE_SIZE, ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
+
+    if (!deriveUpdateKeysFromSecret(shared, sharedLen, salt, sizeof(salt), ctx->aim, ctx->ais, ctx->authUpdateKey,
+                                    ctx->encUpdateKey))
+        return false;
+
+    ctx->updateKeysSet = true;
+
+    uint8_t responderPub[MBEDTLS_ECP_MAX_PT_LEN];
+    size_t responderPubLen = 0;
+    if (mbedtls_ecp_point_write_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Q, MBEDTLS_ECP_PF_UNCOMPRESSED, &responderPubLen,
+                                       responderPub, sizeof(responderPub)) != 0)
+        return false;
+
+    uint8_t buf[APROFILE_MAX_CONTROL_PDU];
+    size_t offset = 0;
+    buf[offset++] = APROFILE_TAG_ASSOCIATION_RESPONSE;
+    buf[offset++] = APROFILE_ASSOC_VERSION;
+    buf[offset++] = (uint8_t)((ctx->aim >> 8) & 0xffu);
+    buf[offset++] = (uint8_t)(ctx->aim & 0xffu);
+    buf[offset++] = (uint8_t)((ctx->ais >> 8) & 0xffu);
+    buf[offset++] = (uint8_t)(ctx->ais & 0xffu);
+    buf[offset++] = (uint8_t)ctx->algorithm;
+    buf[offset++] = (uint8_t)responderPubLen;
+    memcpy(buf + offset, responderPub, responderPubLen);
+    offset += responderPubLen;
+    buf[offset++] = APROFILE_ASSOC_NONCE_SIZE;
+    memcpy(buf + offset, ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
+    offset += APROFILE_ASSOC_NONCE_SIZE;
+    buf[offset++] = APROFILE_ASSOC_NONCE_SIZE;
+    memcpy(buf + offset, peerNonce, APROFILE_ASSOC_NONCE_SIZE);
+    offset += APROFILE_ASSOC_NONCE_SIZE;
+
+    uint8_t mac[APROFILE_CONTROL_MAC_SIZE];
+    if (!hmacTruncated(ctx->authUpdateKey, APROFILE_SESSION_KEY_LENGTH, buf + 1, offset - 1, mac))
+        return false;
+
+    buf[offset++] = APROFILE_CONTROL_MAC_SIZE;
+    memcpy(buf + offset, mac, APROFILE_CONTROL_MAC_SIZE);
+    offset += APROFILE_CONTROL_MAC_SIZE;
+
+    return queueControlPdu(ctx, buf, offset);
+}
+
+static bool
+processAssociationResponse(AProfileContext ctx, const uint8_t* buf, size_t len)
+{
+    if ((ctx == NULL) || (buf == NULL) || (len < 7))
+        return false;
+
+    size_t offset = 1; /* skip tag */
+    if (buf[offset++] != APROFILE_ASSOC_VERSION)
+        return false;
+
+    ctx->aim = ((uint16_t)buf[offset] << 8) | (uint16_t)buf[offset + 1];
+    offset += 2;
+    ctx->ais = ((uint16_t)buf[offset] << 8) | (uint16_t)buf[offset + 1];
+    offset += 2;
+    ctx->algorithm = (AProfileDpaAlgorithm)buf[offset++];
+
+    uint8_t peerPubLen = buf[offset++];
+    if (len < offset + peerPubLen + 1)
+        return false;
+
+    const uint8_t* peerPub = buf + offset;
+    offset += peerPubLen;
+
+    uint8_t nonceLen = buf[offset++];
+    if ((nonceLen != APROFILE_ASSOC_NONCE_SIZE) || (len < offset + nonceLen))
+        return false;
+    memcpy(ctx->assocNoncePeer, buf + offset, nonceLen);
+    offset += nonceLen;
+
+    if (len < offset + APROFILE_ASSOC_NONCE_SIZE + 1 + APROFILE_CONTROL_MAC_SIZE)
+        return false;
+
+    uint8_t initiatorNonceLen = buf[offset++];
+    if ((initiatorNonceLen != APROFILE_ASSOC_NONCE_SIZE) || (len < offset + initiatorNonceLen + 1))
+        return false;
+    memcpy(ctx->assocNonceLocal, buf + offset, initiatorNonceLen);
+    offset += initiatorNonceLen;
+
+    uint8_t macLen = buf[offset++];
+    if ((macLen != APROFILE_CONTROL_MAC_SIZE) || (len < offset + macLen))
+        return false;
+
+    const uint8_t* mac = buf + offset;
+
+    if (!ensureEcdhInitialized(ctx))
+        return false;
+
+    if (mbedtls_ecp_point_read_binary(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.Qp, peerPub, peerPubLen) != 0)
+        return false;
+
+    uint8_t shared[64];
+    size_t sharedLen = (ctx->ecdhCtx.grp.nbits + 7) / 8;
+    if (sharedLen > sizeof(shared))
+        return false;
+    if (mbedtls_ecdh_compute_shared(&ctx->ecdhCtx.grp, &ctx->ecdhCtx.z, &ctx->ecdhCtx.Qp, &ctx->ecdhCtx.d,
+                                    generateRandomBytes, NULL) != 0)
+        return false;
+
+    if (mbedtls_mpi_write_binary(&ctx->ecdhCtx.z, shared, sharedLen) != 0)
+        return false;
+
+    uint8_t salt[APROFILE_ASSOC_NONCE_SIZE * 2];
+    memcpy(salt, ctx->assocNonceLocal, APROFILE_ASSOC_NONCE_SIZE);
+    memcpy(salt + APROFILE_ASSOC_NONCE_SIZE, ctx->assocNoncePeer, APROFILE_ASSOC_NONCE_SIZE);
+
+    if (!deriveUpdateKeysFromSecret(shared, sharedLen, salt, sizeof(salt), ctx->aim, ctx->ais, ctx->authUpdateKey,
+                                    ctx->encUpdateKey))
+        return false;
+
+    if (!hmacTruncated(ctx->authUpdateKey, APROFILE_SESSION_KEY_LENGTH, buf + 1, len - 1 - macLen, ctx->inboundBuffer))
+        return false;
+
+    if (memcmp(ctx->inboundBuffer, mac, macLen) != 0)
+        return false;
+
+    ctx->updateKeysSet = true;
+    ctx->associationInProgress = false;
+    ctx->awaitingAssociationResponse = false;
+    ctx->rekeyRequested = true; /* trigger session key change */
+    return true;
+}
+
+static bool
+encodeSessionKeyChangeRequest(AProfileContext ctx)
+{
+    if (ctx->updateKeysSet == false)
+        return false;
+
+    uint8_t newOutbound[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t newInbound[APROFILE_SESSION_KEY_LENGTH];
+
+    if (!generateRandomBytes(newOutbound, sizeof(newOutbound)))
+        fallbackDeterministicKey(newOutbound, sizeof(newOutbound));
+
+    if (!generateRandomBytes(newInbound, sizeof(newInbound)))
+        fallbackDeterministicKey(newInbound, sizeof(newInbound));
+
+    uint8_t wrappedOutbound[APROFILE_SESSION_KEY_WRAP_LENGTH];
+    uint8_t wrappedInbound[APROFILE_SESSION_KEY_WRAP_LENGTH];
+
+    if (!aesKwWrap(ctx->encUpdateKey, newOutbound, sizeof(newOutbound), wrappedOutbound, sizeof(wrappedOutbound)))
+        return false;
+    if (!aesKwWrap(ctx->encUpdateKey, newInbound, sizeof(newInbound), wrappedInbound, sizeof(wrappedInbound)))
+        return false;
+
+    uint8_t buf[APROFILE_MAX_CONTROL_PDU];
+    size_t offset = 0;
+    buf[offset++] = APROFILE_TAG_SESSION_KEY_CHANGE_REQUEST;
+    buf[offset++] = APROFILE_ASSOC_VERSION;
+    buf[offset++] = sizeof(wrappedOutbound);
+    memcpy(buf + offset, wrappedOutbound, sizeof(wrappedOutbound));
+    offset += sizeof(wrappedOutbound);
+    buf[offset++] = sizeof(wrappedInbound);
+    memcpy(buf + offset, wrappedInbound, sizeof(wrappedInbound));
+    offset += sizeof(wrappedInbound);
+
+    if (!hmacTruncated(ctx->authUpdateKey, APROFILE_SESSION_KEY_LENGTH, buf + 1, offset - 1, buf + offset))
+        return false;
+
+    offset += APROFILE_CONTROL_MAC_SIZE;
+
+    memcpy(ctx->pendingSessionKeyOutbound, newOutbound, sizeof(newOutbound));
+    memcpy(ctx->pendingSessionKeyInbound, newInbound, sizeof(newInbound));
+    ctx->hasPendingSessionKeys = true;
+    ctx->awaitingKeyChangeResponse = true;
+
+    return queueControlPdu(ctx, buf, offset);
+}
+
+static bool
+encodeSessionKeyChangeResponse(AProfileContext ctx, bool success)
+{
+    uint8_t buf[32];
+    size_t offset = 0;
+    buf[offset++] = APROFILE_TAG_SESSION_KEY_CHANGE_RESPONSE;
+    buf[offset++] = APROFILE_ASSOC_VERSION;
+    buf[offset++] = success ? 0x00 : 0x01;
+
+    if (!hmacTruncated(ctx->authUpdateKey, APROFILE_SESSION_KEY_LENGTH, buf + 1, offset - 1, buf + offset))
+        return false;
+
+    offset += APROFILE_CONTROL_MAC_SIZE;
+
+    return queueControlPdu(ctx, buf, offset);
+}
+
+static bool
+processSessionKeyChangeResponse(AProfileContext ctx, const uint8_t* buf, size_t len)
+{
+    if ((len < 1 + 1 + 1 + APROFILE_CONTROL_MAC_SIZE) || (buf[1] != APROFILE_ASSOC_VERSION))
+        return false;
+
+    uint8_t status = buf[2];
+    const uint8_t* mac = buf + 3;
+
+    uint8_t computed[APROFILE_CONTROL_MAC_SIZE];
+    if (!hmacTruncated(ctx->authUpdateKey, APROFILE_SESSION_KEY_LENGTH, buf + 1, 2, computed))
+        return false;
+
+    if (memcmp(mac, computed, APROFILE_CONTROL_MAC_SIZE) != 0)
+        return false;
+
+    if (status == 0x00 && ctx->hasPendingSessionKeys)
+    {
+        AProfile_setSessionKeys(ctx, ctx->pendingSessionKeyOutbound, ctx->pendingSessionKeyInbound);
+        ctx->hasPendingSessionKeys = false;
+    }
+
+    ctx->awaitingKeyChangeResponse = false;
+    return (status == 0x00);
+}
+
 AProfileContext
 AProfile_create(void)
 {
@@ -564,6 +963,13 @@ AProfile_create(void)
         ctx->certificatesVerified = false;
         ctx->rolesAuthorized = false;
         ctx->updateKeysSet = false;
+        ctx->associationInProgress = false;
+        ctx->awaitingAssociationResponse = false;
+        ctx->awaitingKeyChangeResponse = false;
+        ctx->ecdhInitialized = false;
+        ctx->hasPendingSessionKeys = false;
+        ctx->pendingControlLen = 0;
+        mbedtls_ecdh_init(&ctx->ecdhCtx);
     }
 
     return ctx;
@@ -576,7 +982,11 @@ void
 AProfile_destroy(AProfileContext ctx)
 {
     if (ctx)
+    {
+        if (ctx->ecdhInitialized)
+            mbedtls_ecdh_free(&ctx->ecdhCtx);
         GLOBAL_FREEMEM(ctx);
+    }
 }
 
 bool
@@ -658,6 +1068,7 @@ AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const u
     ctx->sessionKeyBirthMs = Hal_getMonotonicTimeInMs();
     ctx->rekeyRequested = false;
     ctx->sentMessages = 0;
+    AProfile_resetCounters(ctx);
     updateAssociationState(ctx);
 
     return true;
@@ -739,6 +1150,7 @@ AProfile_resetCounters(AProfileContext ctx)
     ctx->dsqInExpected = 1;
     ctx->sentMessages = 0;
     ctx->rekeyRequested = false;
+    ctx->awaitingKeyChangeResponse = false;
 }
 
 bool
@@ -788,13 +1200,35 @@ AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame)
         return false;
 
 #if (CONFIG_CS104_APROFILE == 1)
-    if ((ctx->startDtSeen == false) || (ctx->sessionKeysSet == false) || (ctx->associationEstablished == false))
+    if (ctx->pendingControlLen > 0)
+        return AProfile_emitPendingControl(ctx, frame);
+
+    if ((ctx->startDtSeen == false))
+        return false;
+
+    if (ctx->associationEstablished == false)
+    {
+        if (ctx->associationInProgress == false)
+            encodeAssociationRequest(ctx);
+
+        if (ctx->pendingControlLen > 0)
+            return AProfile_emitPendingControl(ctx, frame);
+
+        return false;
+    }
+
+    if (ctx->sessionKeysSet == false)
         return false;
 
     if (AProfile_requiresRekey(ctx))
     {
-        if (!localSessionKeyChange(ctx))
+        if ((ctx->awaitingKeyChangeResponse == false) && !encodeSessionKeyChangeRequest(ctx))
             return false;
+
+        if (ctx->pendingControlLen > 0)
+            return AProfile_emitPendingControl(ctx, frame);
+
+        return false;
     }
 
     int result = wrapPayload(ctx, frame);
@@ -820,6 +1254,53 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
         return APROFILE_CTRL_MSG;
     }
 
+    if (inSize > 1)
+    {
+        if (in[0] == APROFILE_TAG_ASSOCIATION_REQUEST)
+        {
+            size_t offset = 1;
+            if (inSize >= 8)
+            {
+                uint8_t version = in[offset++];
+                uint16_t aim = ((uint16_t)in[offset] << 8) | (uint16_t)in[offset + 1];
+                offset += 2;
+                uint16_t ais = ((uint16_t)in[offset] << 8) | (uint16_t)in[offset + 1];
+                offset += 2;
+                AProfile_setAssociationIds(ctx, aim, ais);
+                ctx->algorithm = (AProfileDpaAlgorithm)in[offset++];
+                uint8_t peerPubLen = in[offset++];
+                if ((version == APROFILE_ASSOC_VERSION) && (inSize >= (int)(offset + peerPubLen + 1)))
+                {
+                    const uint8_t* peerPub = in + offset;
+                    offset += peerPubLen;
+                    uint8_t nonceLen = in[offset++];
+                    if ((nonceLen == APROFILE_ASSOC_NONCE_SIZE) && (inSize >= (int)(offset + nonceLen)))
+                    {
+                        memcpy(ctx->assocNoncePeer, in + offset, nonceLen);
+                        encodeAssociationResponse(ctx, peerPub, peerPubLen, ctx->assocNoncePeer, nonceLen);
+                    }
+                }
+            }
+
+            ctx->telemetry.controlFrames++;
+            return APROFILE_CTRL_MSG;
+        }
+
+        if ((in[0] == APROFILE_TAG_ASSOCIATION_RESPONSE) && (ctx->awaitingAssociationResponse))
+        {
+            processAssociationResponse(ctx, in, (size_t)inSize);
+            ctx->telemetry.controlFrames++;
+            return APROFILE_CTRL_MSG;
+        }
+
+        if (in[0] == APROFILE_TAG_SESSION_KEY_CHANGE_RESPONSE)
+        {
+            processSessionKeyChangeResponse(ctx, in, (size_t)inSize);
+            ctx->telemetry.controlFrames++;
+            return APROFILE_CTRL_MSG;
+        }
+    }
+
     if (inSize < (APROFILE_HEADER_SIZE + APROFILE_MAC_SIZE))
     {
         *out = in;
@@ -831,6 +1312,47 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
     if (in[0] != APROFILE_TAG_SECURE_DATA)
     {
 #if (CONFIG_CS104_APROFILE == 1)
+        if ((in[0] == APROFILE_TAG_SESSION_KEY_CHANGE_REQUEST) && ctx->updateKeysSet)
+        {
+            size_t offset = 2; /* tag + version */
+            if ((inSize > (int)offset) && (in[1] == APROFILE_ASSOC_VERSION))
+            {
+                uint8_t wrapOutLen = in[offset++];
+                if (inSize >= (int)(offset + wrapOutLen + 1))
+                {
+                    const uint8_t* wrappedOutbound = in + offset;
+                    offset += wrapOutLen;
+                    uint8_t wrapInLen = in[offset++];
+                    if (inSize >= (int)(offset + wrapInLen + APROFILE_CONTROL_MAC_SIZE))
+                    {
+                        const uint8_t* wrappedInbound = in + offset;
+                        offset += wrapInLen;
+                        const uint8_t* mac = in + offset;
+
+                        uint8_t calc[APROFILE_CONTROL_MAC_SIZE];
+                        if (hmacTruncated(ctx->authUpdateKey, APROFILE_SESSION_KEY_LENGTH, in + 1, offset - 1, calc) &&
+                            (memcmp(calc, mac, APROFILE_CONTROL_MAC_SIZE) == 0))
+                        {
+                            uint8_t newOut[APROFILE_SESSION_KEY_LENGTH];
+                            uint8_t newIn[APROFILE_SESSION_KEY_LENGTH];
+
+                            bool ok = aesKwUnwrap(ctx->encUpdateKey, wrappedOutbound, wrapOutLen, newOut,
+                                                  sizeof(newOut));
+                            ok = ok && aesKwUnwrap(ctx->encUpdateKey, wrappedInbound, wrapInLen, newIn, sizeof(newIn));
+
+                            if (ok)
+                                ok = AProfile_setSessionKeys(ctx, newOut, newIn);
+
+                            encodeSessionKeyChangeResponse(ctx, ok);
+                        }
+                    }
+                }
+            }
+
+            ctx->telemetry.controlFrames++;
+            return APROFILE_CTRL_MSG;
+        }
+
         if (ctx->sessionKeysSet && ctx->associationEstablished)
         {
             *out = NULL;
@@ -930,4 +1452,25 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
     *outSize = inSize;
     return APROFILE_PLAINTEXT;
 #endif
+}
+
+bool
+AProfile_hasPendingControl(AProfileContext ctx)
+{
+    return (ctx != NULL) && (ctx->pendingControlLen > 0);
+}
+
+bool
+AProfile_emitPendingControl(AProfileContext ctx, T104Frame frame)
+{
+    if ((ctx == NULL) || (frame == NULL) || (ctx->pendingControlLen == 0))
+        return false;
+
+    T104Frame_resetFrame((Frame)frame);
+    if (T104Frame_getSpaceLeft((Frame)frame) < (int)ctx->pendingControlLen)
+        return false;
+
+    T104Frame_appendBytes((Frame)frame, ctx->pendingControl, (int)ctx->pendingControlLen);
+    ctx->pendingControlLen = 0;
+    return true;
 }

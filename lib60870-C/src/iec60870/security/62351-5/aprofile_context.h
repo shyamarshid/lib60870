@@ -89,5 +89,7 @@ bool AProfile_requiresRekey(AProfileContext ctx);
 bool AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame);
 AProfileKind AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
                                   const uint8_t** out, int* outSize);
+bool AProfile_hasPendingControl(AProfileContext ctx);
+bool AProfile_emitPendingControl(AProfileContext ctx, T104Frame frame);
 
 #endif /* APROFILE_CONTEXT_H_ */
