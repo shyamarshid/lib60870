@@ -1422,13 +1422,18 @@ sendASDUInternal(CS104_Connection self, Frame frame)
 
         if (isSentBufferFull(self) == false)
         {
+            bool allowSend = true;
+
             #if (CONFIG_CS104_APROFILE == 1)
-            if (self->sec && AProfile_ready(self->sec))
-                AProfile_wrapOutAsdu(self->sec, (T104Frame)frame);
+            if (self->sec)
+                allowSend = AProfile_wrapOutAsdu(self->sec, (T104Frame)frame);
             #endif
 
-            sendIMessageAndUpdateSentASDUs(self, frame);
-            retVal = true;
+            if (allowSend)
+            {
+                sendIMessageAndUpdateSentASDUs(self, frame);
+                retVal = true;
+            }
         }
 
 #if (CONFIG_USE_SEMAPHORES == 1)

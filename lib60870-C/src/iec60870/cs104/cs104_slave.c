@@ -2079,14 +2079,19 @@ sendASDUInternal(MasterConnection self, CS101_ASDU asdu)
             Frame frame = BufferFrame_initialize(&bufferFrame, frameBuffer.msg, IEC60870_5_104_APCI_LENGTH);
             CS101_ASDU_encode(asdu, frame);
 
+            bool allowSend = true;
+
             #if (CONFIG_CS104_APROFILE == 1)
-            if (self->sec && AProfile_ready(self->sec))
-                AProfile_wrapOutAsdu(self->sec, (T104Frame)frame);
+            if (self->sec)
+                allowSend = AProfile_wrapOutAsdu(self->sec, (T104Frame)frame);
             #endif
 
-            frameBuffer.msgSize = Frame_getMsgSize(frame);
+            if (allowSend)
+            {
+                frameBuffer.msgSize = Frame_getMsgSize(frame);
 
-            sendASDU(self, frameBuffer.msg, frameBuffer.msgSize, 0, NULL);
+                sendASDU(self, frameBuffer.msg, frameBuffer.msgSize, 0, NULL);
+            }
 
 #if (CONFIG_USE_SEMAPHORES == 1)
             Semaphore_post(self->sentASDUsLock);
