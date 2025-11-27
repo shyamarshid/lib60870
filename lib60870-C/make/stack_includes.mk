@@ -2,3 +2,4 @@ INCLUDES += -I$(LIB60870_HOME)/src/inc/api
 INCLUDES += -I$(LIB60870_HOME)/src/hal/inc
 INCLUDES += -I$(LIB60870_HOME)/src/tls
 INCLUDES += -I$(LIB60870_HOME)/src/iec60870/security/62351-5
+INCLUDES += -I$(LIB60870_HOME)/config
