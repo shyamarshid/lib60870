@@ -49,8 +49,11 @@ struct sAProfileContext
 {
     bool startDtSeen;
     bool sessionKeysSet;
+    bool rekeyRequested;
     uint32_t dsqOut;
     uint32_t dsqInExpected;
+    uint32_t sentMessages;
+    uint64_t sessionKeyBirthMs;
     uint8_t sessionKeyOutbound[APROFILE_SESSION_KEY_LENGTH];
     uint8_t sessionKeyInbound[APROFILE_SESSION_KEY_LENGTH];
 };
@@ -106,6 +109,28 @@ initializeSessionKeys(AProfileContext ctx)
         fallbackDeterministicKey(ctx->sessionKeyInbound, APROFILE_SESSION_KEY_LENGTH);
 
     ctx->sessionKeysSet = true;
+    ctx->sessionKeyBirthMs = Hal_getMonotonicTimeInMs();
+    ctx->rekeyRequested = false;
+    ctx->sentMessages = 0;
+}
+
+static bool
+shouldRequestRekey(AProfileContext ctx)
+{
+    const uint64_t now = Hal_getMonotonicTimeInMs();
+
+    if ((CONFIG_CS104_APROFILE_MAX_SESSION_AGE_MS > 0) &&
+        ((now - ctx->sessionKeyBirthMs) > (uint64_t)CONFIG_CS104_APROFILE_MAX_SESSION_AGE_MS))
+        return true;
+
+    if ((CONFIG_CS104_APROFILE_MAX_MESSAGES_PER_SESSION > 0) &&
+        (ctx->sentMessages >= CONFIG_CS104_APROFILE_MAX_MESSAGES_PER_SESSION))
+        return true;
+
+    if (ctx->dsqOut >= (UINT32_MAX - CONFIG_CS104_APROFILE_DSQ_REKEY_MARGIN))
+        return true;
+
+    return false;
 }
 
 static bool
@@ -204,6 +229,9 @@ AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const u
     memcpy(ctx->sessionKeyOutbound, outboundKey, APROFILE_SESSION_KEY_LENGTH);
     memcpy(ctx->sessionKeyInbound, inboundKey, APROFILE_SESSION_KEY_LENGTH);
     ctx->sessionKeysSet = true;
+    ctx->sessionKeyBirthMs = Hal_getMonotonicTimeInMs();
+    ctx->rekeyRequested = false;
+    ctx->sentMessages = 0;
 
     return true;
 }
@@ -216,6 +244,26 @@ AProfile_resetCounters(AProfileContext ctx)
 
     ctx->dsqOut = 1;
     ctx->dsqInExpected = 1;
+    ctx->sentMessages = 0;
+    ctx->rekeyRequested = false;
+}
+
+bool
+AProfile_requiresRekey(AProfileContext ctx)
+{
+#if (CONFIG_CS104_APROFILE == 1)
+    if ((ctx == NULL) || (ctx->sessionKeysSet == false))
+        return false;
+
+    if (ctx->rekeyRequested)
+        return true;
+
+    ctx->rekeyRequested = shouldRequestRekey(ctx);
+    return ctx->rekeyRequested;
+#else
+    (void)ctx;
+    return false;
+#endif
 }
 
 bool
@@ -250,10 +298,14 @@ AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame)
     if ((ctx->startDtSeen == false) || (ctx->sessionKeysSet == false))
         return false;
 
+    if (AProfile_requiresRekey(ctx))
+        return false;
+
     int result = wrapPayload(ctx, frame);
     if (result > 0)
     {
         ctx->dsqOut++;
+        ctx->sentMessages++;
         return true;
     }
 #endif

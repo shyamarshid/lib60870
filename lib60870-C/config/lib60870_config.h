@@ -111,19 +111,37 @@
 #endif
 
 /**
- * Enable support for IEC 62351-5 A-profile security layer.
+ * IEC 62351-5 A-profile security defaults (PICS)
  *
- * When set to 1 additional security related code will be
- * compiled into the library. By default this feature is
- * disabled to keep the footprint small.
+ * The library ships with A-profile enabled so integrators can
+ * exercise secure messaging paths by default. The following
+ * macros describe the Protection Information Conformance
+ * Statement (PICS) defaults for key management and rekey
+ * behavior; applications may override them at build time to
+ * tighten limits.
  */
 #ifndef CONFIG_CS104_APROFILE
-#define CONFIG_CS104_APROFILE 0
+#define CONFIG_CS104_APROFILE 1
 #endif
 
 /* Enable optional AEAD support for the A-profile implementation */
 #ifndef CONFIG_CS104_APROFILE_AEAD
 #define CONFIG_CS104_APROFILE_AEAD 0
+#endif
+
+/* Maximum number of secure ASDUs before a session key rotation is requested */
+#ifndef CONFIG_CS104_APROFILE_MAX_MESSAGES_PER_SESSION
+#define CONFIG_CS104_APROFILE_MAX_MESSAGES_PER_SESSION 100000
+#endif
+
+/* Maximum age (in milliseconds) of a session key set before rotation is requested */
+#ifndef CONFIG_CS104_APROFILE_MAX_SESSION_AGE_MS
+#define CONFIG_CS104_APROFILE_MAX_SESSION_AGE_MS 600000 /* 10 minutes */
+#endif
+
+/* Reserve DSQ space to trigger a rekey before counter wrap */
+#ifndef CONFIG_CS104_APROFILE_DSQ_REKEY_MARGIN
+#define CONFIG_CS104_APROFILE_DSQ_REKEY_MARGIN 32
 #endif
 
 #endif /* CONFIG_LIB60870_CONFIG_H_ */

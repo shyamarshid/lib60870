@@ -45,6 +45,13 @@ bool AProfile_ready(AProfileContext ctx);
 bool AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const uint8_t* inboundKey);
 void AProfile_resetCounters(AProfileContext ctx);
 
+/*
+ * Return true when a new session key set should be negotiated. This is
+ * driven by configurable limits for DSQ wraparound, message volume, and
+ * maximum key age.
+ */
+bool AProfile_requiresRekey(AProfileContext ctx);
+
 bool AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame);
 AProfileKind AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
                                   const uint8_t** out, int* outSize);
