@@ -60,6 +60,7 @@ LIB_INCLUDE_DIRS += src/inc/api
 LIB_INCLUDE_DIRS += src/inc/internal
 LIB_INCLUDE_DIRS += src/hal/inc
 LIB_INCLUDE_DIRS += src/common/inc
+LIB_INCLUDE_DIRS += src/iec60870/security/62351-5
 
 
 LIB_INCLUDES = $(addprefix -I,$(LIB_INCLUDE_DIRS))
@@ -79,6 +80,7 @@ LIB_API_HEADER_FILES += src/inc/api/cs101_master.h
 LIB_API_HEADER_FILES += src/inc/api/cs101_slave.h
 LIB_API_HEADER_FILES += src/inc/api/cs104_connection.h
 LIB_API_HEADER_FILES += src/inc/api/cs104_security.h
+LIB_API_HEADER_FILES += src/iec60870/security/62351-5/aprofile_context.h
 LIB_API_HEADER_FILES += src/inc/api/cs104_slave.h
 LIB_API_HEADER_FILES += src/inc/api/iec60870_common.h
 LIB_API_HEADER_FILES += src/inc/api/iec60870_master.h

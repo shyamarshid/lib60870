@@ -20,6 +20,6 @@
 #ifndef APROFILE_INTERNAL_H_
 #define APROFILE_INTERNAL_H_
 
-#include "../../iec60870/security/62351-5/aprofile_context.h"
+#include "aprofile_context.h"
 
 #endif /* APROFILE_INTERNAL_H_ */
