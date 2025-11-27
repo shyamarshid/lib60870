@@ -101,20 +101,6 @@ print_hex(const uint8_t* b, int len)
         printf("%02X ", b[i]);
 }
 
-static const uint8_t SERVER_OUTBOUND_SESSION_KEY[APROFILE_SESSION_KEY_LENGTH] = {
-    0x21, 0x22, 0x23, 0x24, 0x25, 0x26, 0x27, 0x28,
-    0x29, 0x2A, 0x2B, 0x2C, 0x2D, 0x2E, 0x2F, 0x30,
-    0x31, 0x32, 0x33, 0x34, 0x35, 0x36, 0x37, 0x38,
-    0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F, 0x40
-};
-
-static const uint8_t SERVER_INBOUND_SESSION_KEY[APROFILE_SESSION_KEY_LENGTH] = {
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-    0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
-    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
-    0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
-};
-
 static const uint8_t UPDATE_AUTH_KEY[APROFILE_SESSION_KEY_LENGTH] = {
     0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
     0xA8, 0xA9, 0xAA, 0xAB, 0xAC, 0xAD, 0xAE, 0xAF,
@@ -130,7 +116,7 @@ static const uint8_t UPDATE_ENC_KEY[APROFILE_SESSION_KEY_LENGTH] = {
 };
 
 static void
-configureSecurity(CS104_SecurityConfig* sec, bool useStaticKeys)
+configureSecurity(CS104_SecurityConfig* sec)
 {
     memset(sec, 0, sizeof(*sec));
 
@@ -145,19 +131,13 @@ configureSecurity(CS104_SecurityConfig* sec, bool useStaticKeys)
     sec->hasUpdateKeys = true;
     memcpy(sec->authenticationUpdateKey, UPDATE_AUTH_KEY, sizeof(sec->authenticationUpdateKey));
     memcpy(sec->encryptionUpdateKey, UPDATE_ENC_KEY, sizeof(sec->encryptionUpdateKey));
-
-    if (useStaticKeys) {
-        sec->hasStaticSessionKeys = true;
-        memcpy(sec->outboundSessionKey, SERVER_OUTBOUND_SESSION_KEY, sizeof(sec->outboundSessionKey));
-        memcpy(sec->inboundSessionKey, SERVER_INBOUND_SESSION_KEY, sizeof(sec->inboundSessionKey));
-    }
 }
 
 static void
-printSecurityConfig(const CS104_SecurityConfig* sec, bool usingStaticKeys)
+printSecurityConfig(const CS104_SecurityConfig* sec)
 {
     printf("[SERVER] ALS config: AIM=0x%04X AIS=0x%04X DPA=%s (keys: %s)\n", sec->aim, sec->ais,
-           getDpaName(sec->dpaAlgorithm), usingStaticKeys ? "preloaded" : "handshake/ECDH");
+           getDpaName(sec->dpaAlgorithm), "handshake/ECDH");
 }
 
 static CS104_CertConfig
@@ -198,7 +178,7 @@ buildCertConfig(const char* localCertPath, const char* localKeyPath, const char*
 static void
 printServerUsage(void)
 {
-    printf("Usage: server_aprofile_debug [port] [--local-cert PATH] [--local-key PATH] [--peer-cert PATH] [--static-keys]\n");
+    printf("Usage: server_aprofile_debug [port] [--local-cert PATH] [--local-key PATH] [--peer-cert PATH]\n");
 }
 
 static void
@@ -450,7 +430,6 @@ main(int argc, char** argv)
     const char* localCertPath = NULL;
     const char* peerCertPath = NULL;
     const char* localKeyPath = NULL;
-    bool useStaticKeys = false;
 
     bool portSet = false;
 
@@ -467,9 +446,6 @@ main(int argc, char** argv)
         }
         else if (strcmp(argv[i], "--peer-cert") == 0 && (i + 1 < argc)) {
             peerCertPath = argv[++i];
-        }
-        else if (strcmp(argv[i], "--static-keys") == 0) {
-            useStaticKeys = true;
         }
         else if (portSet == false) {
             port = (uint16_t) atoi(argv[i]);
@@ -493,10 +469,9 @@ main(int argc, char** argv)
 
     /* Set security options for ALS */
     CS104_SecurityConfig sec;
-    configureSecurity(&sec, useStaticKeys);
-    printSecurityConfig(&sec, useStaticKeys);
-    printf("[SERVER] %s\n", useStaticKeys ? "Static session keys preloaded (handshake optional)"
-                                           : "ALS handshake enabled; expect E1-E4 control frames");
+    configureSecurity(&sec);
+    printSecurityConfig(&sec);
+    printf("[SERVER] ALS handshake enabled; expect E1-E4 control frames\n");
 
     CS104_CertConfig cert = buildCertConfig(localCertPath, localKeyPath, peerCertPath);
     CS104_RoleConfig role = { .rolesAvailable = true };
