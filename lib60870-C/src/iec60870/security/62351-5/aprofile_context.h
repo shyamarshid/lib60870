@@ -34,6 +34,22 @@ typedef enum
     APROFILE_CTRL_MSG
 } AProfileKind;
 
+typedef enum
+{
+    APROFILE_DPA_HMAC_SHA256 = 0,
+    APROFILE_DPA_HMAC_SHA3_256,
+    APROFILE_DPA_HMAC_BLAKE2S_256,
+    APROFILE_DPA_AES256_GCM
+} AProfileDpaAlgorithm;
+
+typedef struct
+{
+    uint32_t secureAccepted;
+    uint32_t secureRejected;
+    uint32_t replayRejected;
+    uint32_t controlFrames;
+} AProfileTelemetry;
+
 typedef struct sT104Frame* T104Frame;
 
 AProfileContext AProfile_create(void);
@@ -41,6 +57,15 @@ void AProfile_destroy(AProfileContext ctx);
 
 bool AProfile_onStartDT(AProfileContext ctx);
 bool AProfile_ready(AProfileContext ctx);
+
+bool AProfile_setAssociationIds(AProfileContext ctx, uint16_t aim, uint16_t ais);
+bool AProfile_getAssociationIds(AProfileContext ctx, uint16_t* aim, uint16_t* ais);
+
+bool AProfile_setDpaAlgorithm(AProfileContext ctx, AProfileDpaAlgorithm algorithm);
+AProfileDpaAlgorithm AProfile_getDpaAlgorithm(AProfileContext ctx);
+
+void AProfile_getTelemetry(AProfileContext ctx, AProfileTelemetry* telemetryOut);
+void AProfile_clearTelemetry(AProfileContext ctx);
 
 bool AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const uint8_t* inboundKey);
 void AProfile_resetCounters(AProfileContext ctx);
