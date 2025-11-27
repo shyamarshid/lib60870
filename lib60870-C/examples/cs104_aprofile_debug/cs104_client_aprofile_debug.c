@@ -101,12 +101,12 @@ static const uint8_t UPDATE_ENC_KEY[APROFILE_SESSION_KEY_LENGTH] = {
 };
 
 static void
-configureSecurity(CS104_SecurityConfig* sec)
+configureSecurity(CS104_SecurityConfig* sec, uint16_t aim, uint16_t ais)
 {
     memset(sec, 0, sizeof(*sec));
 
-    sec->aim = 0x1001;
-    sec->ais = 0x2001;
+    sec->aim = aim;
+    sec->ais = ais;
 #ifdef APROFILE_DPA_HMAC_SHA256_TCP
     sec->dpaAlgorithm = APROFILE_DPA_HMAC_SHA256_TCP;
 #else
@@ -163,7 +163,7 @@ buildCertConfig(const char* localCertPath, const char* localKeyPath, const char*
 static void
 printClientUsage(void)
 {
-    printf("Usage: client_aprofile_debug [ip] [port] [localIp] [localPort] [--local-cert PATH] [--local-key PATH] [--peer-cert PATH]\n");
+    printf("Usage: client_aprofile_debug [ip] [port] [localIp] [localPort] [--aim 0xID] [--ais 0xID] [--local-cert PATH] [--local-key PATH] [--peer-cert PATH]\n");
 }
 
 static void
@@ -288,6 +288,8 @@ main(int argc, char** argv)
     uint16_t port = IEC_60870_5_104_DEFAULT_PORT;
     const char* localIp = NULL;
     int localPort = -1;
+    uint16_t aim = 0x1001;
+    uint16_t ais = 0x2001;
     const char* localCertPath = NULL;
     const char* peerCertPath = NULL;
     const char* localKeyPath = NULL;
@@ -301,6 +303,12 @@ main(int argc, char** argv)
         if (strcmp(argv[i], "--help") == 0) {
             printClientUsage();
             return 0;
+        }
+        else if (strcmp(argv[i], "--aim") == 0 && (i + 1 < argc)) {
+            aim = (uint16_t) strtol(argv[++i], NULL, 0);
+        }
+        else if (strcmp(argv[i], "--ais") == 0 && (i + 1 < argc)) {
+            ais = (uint16_t) strtol(argv[++i], NULL, 0);
         }
         else if (strcmp(argv[i], "--local-cert") == 0 && (i + 1 < argc)) {
             localCertPath = argv[++i];
@@ -339,7 +347,7 @@ main(int argc, char** argv)
     CS104_Connection conn = CS104_Connection_create(ip, port);
 
     CS104_SecurityConfig sec;
-    configureSecurity(&sec);
+    configureSecurity(&sec, aim, ais);
     printSecurityConfig(&sec);
     printf("[CLIENT] ALS handshake enabled; expect E1-E4 control frames\n");
 
