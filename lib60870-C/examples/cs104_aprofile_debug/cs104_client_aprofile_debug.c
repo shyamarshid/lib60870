@@ -39,6 +39,8 @@ print_hex(const uint8_t* b, int len)
         printf("%02X ", b[i]);
 }
 
+static volatile bool startDtConfirmed = false;
+
 static const uint8_t CLIENT_OUTBOUND_SESSION_KEY[APROFILE_SESSION_KEY_LENGTH] = {
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
     0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
@@ -174,6 +176,7 @@ connectionHandler(void* parameter, CS104_Connection connection, CS104_Connection
         break;
     case CS104_CONNECTION_STARTDT_CON_RECEIVED:
         printf("[CLIENT] STARTDT_CON received\n");
+        startDtConfirmed = true;
         break;
     case CS104_CONNECTION_STOPDT_CON_RECEIVED:
         printf("[CLIENT] STOPDT_CON received\n");
@@ -252,7 +255,14 @@ main(int argc, char** argv)
 
     CS101_AppLayerParameters alParams = CS104_Connection_getAppLayerParameters(conn);
 
-    Thread_sleep(500);
+    startDtConfirmed = false;
+    CS104_Connection_sendStartDT(conn);
+
+    for (int i = 0; (i < 50) && (startDtConfirmed == false); i++)
+        Thread_sleep(100);
+
+    if (startDtConfirmed == false)
+        printf("[CLIENT] STARTDT_CON not received within timeout\n");
 
     CS101_ASDU gi = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);
     CS101_ASDU_setTypeID(gi, C_IC_NA_1);
