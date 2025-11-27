@@ -317,16 +317,28 @@ selectMac(AProfileDpaAlgorithm algorithm)
 }
 
 static void
-deriveNonceFromHeader(const uint8_t* header, size_t headerLen, uint8_t nonce[12])
+deriveNonceFromDsq(uint32_t dsq, uint8_t nonce[12])
 {
     memset(nonce, 0, 12);
 
-    /* Use DSQ||AIM||AIS as nonce input to guarantee monotonicity */
-    size_t usable = (headerLen > 1) ? (headerLen - 1) : 0;
-    if (usable > 12)
-        usable = 12;
+    /* Place the 32-bit DSQ in network byte order at the tail of the nonce */
+    nonce[8] = (uint8_t)((dsq >> 24) & 0xffu);
+    nonce[9] = (uint8_t)((dsq >> 16) & 0xffu);
+    nonce[10] = (uint8_t)((dsq >> 8) & 0xffu);
+    nonce[11] = (uint8_t)(dsq & 0xffu);
+}
 
-    memcpy(nonce, header + 1, usable);
+static void
+buildAssociationIdAd(uint16_t aim, uint16_t ais, uint8_t* aadBuf, size_t* aadLen)
+{
+    if ((aadBuf == NULL) || (aadLen == NULL))
+        return;
+
+    aadBuf[0] = (uint8_t)((aim >> 8) & 0xffu);
+    aadBuf[1] = (uint8_t)(aim & 0xffu);
+    aadBuf[2] = (uint8_t)((ais >> 8) & 0xffu);
+    aadBuf[3] = (uint8_t)(ais & 0xffu);
+    *aadLen = 4;
 }
 
 static bool
@@ -339,13 +351,19 @@ protectPayload(AProfileContext ctx, const uint8_t* key, const uint8_t* header, s
         mbedtls_gcm_init(&gcm);
 
         uint8_t nonce[12];
-        deriveNonceFromHeader(header, headerLen, nonce);
+        uint32_t dsq = ((uint32_t)header[1] << 24) | ((uint32_t)header[2] << 16) |
+                       ((uint32_t)header[3] << 8) | (uint32_t)header[4];
+        deriveNonceFromDsq(dsq, nonce);
+
+        uint8_t aad[4];
+        size_t aadLen = 0;
+        buildAssociationIdAd(ctx->aim, ctx->ais, aad, &aadLen);
 
         int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
         if (ret == 0)
         {
-            ret = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plaintextLen, nonce, sizeof(nonce), header,
-                                            headerLen, plaintext, outPayload, APROFILE_MAC_SIZE, outMac);
+            ret = mbedtls_gcm_crypt_and_tag(&gcm, MBEDTLS_GCM_ENCRYPT, plaintextLen, nonce, sizeof(nonce), aad, aadLen,
+                                            plaintext, outPayload, APROFILE_MAC_SIZE, outMac);
         }
 
         mbedtls_gcm_free(&gcm);
@@ -409,13 +427,19 @@ validateAndDecryptPayload(AProfileContext ctx, const uint8_t* key, const uint8_t
         mbedtls_gcm_init(&gcm);
 
         uint8_t nonce[12];
-        deriveNonceFromHeader(header, headerLen, nonce);
+        uint32_t dsq = ((uint32_t)header[1] << 24) | ((uint32_t)header[2] << 16) |
+                       ((uint32_t)header[3] << 8) | (uint32_t)header[4];
+        deriveNonceFromDsq(dsq, nonce);
+
+        uint8_t aad[4];
+        size_t aadLen = 0;
+        buildAssociationIdAd(ctx->aim, ctx->ais, aad, &aadLen);
 
         int ret = mbedtls_gcm_setkey(&gcm, MBEDTLS_CIPHER_ID_AES, key, 256);
         if (ret == 0)
         {
-            ret = mbedtls_gcm_auth_decrypt(&gcm, payloadLen, nonce, sizeof(nonce), header, headerLen, mac,
-                                           APROFILE_MAC_SIZE, cipherPayload, outPlaintext);
+            ret = mbedtls_gcm_auth_decrypt(&gcm, payloadLen, nonce, sizeof(nonce), aad, aadLen, mac, APROFILE_MAC_SIZE,
+                                           cipherPayload, outPlaintext);
         }
 
         mbedtls_gcm_free(&gcm);
@@ -806,6 +830,17 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
 
     if (in[0] != APROFILE_TAG_SECURE_DATA)
     {
+#if (CONFIG_CS104_APROFILE == 1)
+        if (ctx->sessionKeysSet && ctx->associationEstablished)
+        {
+            *out = NULL;
+            *outSize = 0;
+            ctx->telemetry.plaintextRejected++;
+            ctx->telemetry.controlFrames++;
+            return APROFILE_CTRL_MSG;
+        }
+#endif
+
         *out = in;
         *outSize = inSize;
         ctx->telemetry.controlFrames++;

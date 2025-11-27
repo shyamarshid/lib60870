@@ -48,6 +48,7 @@ typedef struct
     uint32_t secureAccepted;
     uint32_t secureRejected;
     uint32_t replayRejected;
+    uint32_t plaintextRejected;
     uint32_t controlFrames;
 } AProfileTelemetry;
 
