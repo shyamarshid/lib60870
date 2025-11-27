@@ -23,81 +23,104 @@
 #include "hal_time.h"
 #include "lib_memory.h"
 
+#include <limits.h>
 #include <stddef.h>
 #include <string.h>
 
+#include "mbedtls/ctr_drbg.h"
+#include "mbedtls/entropy.h"
+#include "mbedtls/md.h"
+
 #define APROFILE_TAG_SECURE_DATA 0xF1
 #define APROFILE_HEADER_SIZE 7 /* tag (1) + DSQ (4) + ASDU length (2) */
-#define APROFILE_MAC_SIZE 8
+#define APROFILE_MAC_SIZE 16 /* HMAC-SHA-256 truncated for 104/TCP */
 
 /*
- * This implementation provides a lightweight, self-contained version of the
+ * This implementation provides a hardened, self-contained version of the
  * IEC 62351-5 A-profile data processing logic. It focuses on deterministic
- * replay protection (DSQ handling) and integrity tagging using an internal
- * keyed checksum. The checksum is intentionally simple to avoid new
- * dependencies while keeping the code functional and compile-ready. The
- * structure mirrors the standard message flow: the outgoing ASDU is wrapped
- * with a header and authentication tag, and the incoming PDU is validated and
- * unwrapped before the ASDU parser consumes it.
+ * replay protection (DSQ handling) and integrity tagging using the mandatory
+ * HMAC-SHA-256 (truncated to 16 octets for 104 over TCP). The code maintains
+ * distinct inbound/outbound session keys, enforces DSQ progression, and
+ * exposes helper functions to reset counters or inject externally derived
+ * session keys from a Station Association / Session Key Change workflow.
  */
 
 struct sAProfileContext
 {
     bool startDtSeen;
+    bool sessionKeysSet;
     uint32_t dsqOut;
     uint32_t dsqInExpected;
-    uint8_t sessionKey[32];
+    uint8_t sessionKeyOutbound[APROFILE_SESSION_KEY_LENGTH];
+    uint8_t sessionKeyInbound[APROFILE_SESSION_KEY_LENGTH];
 };
 
-static void
-generateSessionKey(AProfileContext ctx)
+static mbedtls_entropy_context entropy_ctx;
+static mbedtls_ctr_drbg_context drbg_ctx;
+static bool rng_initialized = false;
+
+static bool
+generateRandomBytes(uint8_t* out, size_t length)
 {
-    /*
-     * A simple deterministic key schedule derived from the monotonic clock.
-     * The goal is to avoid external dependencies while still producing a
-     * non-zero key stream for the internal checksum. This is not intended to
-     * be cryptographically strong; the TLS layer (IEC 62351-3) must be used to
-     * provide confidentiality when required.
-     */
+    if (!rng_initialized)
+    {
+        mbedtls_entropy_init(&entropy_ctx);
+        mbedtls_ctr_drbg_init(&drbg_ctx);
+
+        const char* pers = "aprofile";
+        if (mbedtls_ctr_drbg_seed(&drbg_ctx, mbedtls_entropy_func, &entropy_ctx,
+                                  (const unsigned char*)pers, strlen(pers)) != 0)
+        {
+            mbedtls_ctr_drbg_free(&drbg_ctx);
+            mbedtls_entropy_free(&entropy_ctx);
+            return false;
+        }
+
+        rng_initialized = true;
+    }
+
+    return (mbedtls_ctr_drbg_random(&drbg_ctx, out, length) == 0);
+}
+
+static void
+fallbackDeterministicKey(uint8_t* keyBuf, size_t length)
+{
     uint64_t seed = Hal_getMonotonicTimeInMs();
 
-    for (size_t i = 0; i < sizeof(ctx->sessionKey); i++)
+    for (size_t i = 0; i < length; i++)
     {
         seed ^= (seed << 13);
         seed ^= (seed >> 7);
         seed ^= (seed << 17);
-        ctx->sessionKey[i] = (uint8_t)(seed & 0xffu);
+        keyBuf[i] = (uint8_t)(seed & 0xffu);
     }
 }
 
 static void
-calculateMac(const AProfileContext ctx, const uint8_t* data, size_t dataLen, uint8_t outMac[APROFILE_MAC_SIZE])
+initializeSessionKeys(AProfileContext ctx)
 {
-    /*
-     * Fowler–Noll–Vo style keyed checksum. The function folds the session key
-     * into the accumulator before processing the payload. The resulting
-     * 64‑bit tag is exported in big-endian layout.
-     */
-    uint64_t acc = 1469598103934665603ULL; /* FNV offset basis */
-    const uint64_t prime = 1099511628211ULL;
+    if (!generateRandomBytes(ctx->sessionKeyOutbound, APROFILE_SESSION_KEY_LENGTH))
+        fallbackDeterministicKey(ctx->sessionKeyOutbound, APROFILE_SESSION_KEY_LENGTH);
 
-    for (size_t i = 0; i < sizeof(ctx->sessionKey); i++)
-    {
-        acc ^= ctx->sessionKey[i];
-        acc *= prime;
-    }
+    if (!generateRandomBytes(ctx->sessionKeyInbound, APROFILE_SESSION_KEY_LENGTH))
+        fallbackDeterministicKey(ctx->sessionKeyInbound, APROFILE_SESSION_KEY_LENGTH);
 
-    for (size_t i = 0; i < dataLen; i++)
-    {
-        acc ^= data[i];
-        acc *= prime;
-    }
+    ctx->sessionKeysSet = true;
+}
 
-    for (int i = APROFILE_MAC_SIZE - 1; i >= 0; i--)
-    {
-        outMac[i] = (uint8_t)(acc & 0xffu);
-        acc >>= 8;
-    }
+static bool
+calculateMac(const uint8_t* key, const uint8_t* data, size_t dataLen, uint8_t outMac[APROFILE_MAC_SIZE])
+{
+    const mbedtls_md_info_t* md_info = mbedtls_md_info_from_type(MBEDTLS_MD_SHA256);
+    if (md_info == NULL)
+        return false;
+
+    uint8_t fullMac[MBEDTLS_MD_MAX_SIZE];
+    if (mbedtls_md_hmac(md_info, key, APROFILE_SESSION_KEY_LENGTH, data, dataLen, fullMac) != 0)
+        return false;
+
+    memcpy(outMac, fullMac, APROFILE_MAC_SIZE);
+    return true;
 }
 
 static int
@@ -105,6 +128,9 @@ wrapPayload(AProfileContext ctx, T104Frame frame)
 {
     int msgSize = T104Frame_getMsgSize((Frame)frame);
     if (msgSize <= IEC60870_5_104_APCI_LENGTH)
+        return -1;
+
+    if (ctx->dsqOut == 0 || ctx->dsqOut == UINT32_MAX)
         return -1;
 
     int asduLength = msgSize - IEC60870_5_104_APCI_LENGTH;
@@ -121,11 +147,14 @@ wrapPayload(AProfileContext ctx, T104Frame frame)
     securePayload[2] = (uint8_t)((ctx->dsqOut >> 16) & 0xffu);
     securePayload[3] = (uint8_t)((ctx->dsqOut >> 8) & 0xffu);
     securePayload[4] = (uint8_t)(ctx->dsqOut & 0xffu);
+
     securePayload[5] = (uint8_t)((asduLength >> 8) & 0xffu);
     securePayload[6] = (uint8_t)(asduLength & 0xffu);
 
     uint8_t mac[APROFILE_MAC_SIZE];
-    calculateMac(ctx, securePayload, (size_t)(APROFILE_HEADER_SIZE + asduLength), mac);
+    if (!calculateMac(ctx->sessionKeyOutbound, securePayload, (size_t)(APROFILE_HEADER_SIZE + asduLength), mac))
+        return -1;
+
     memcpy(securePayload + APROFILE_HEADER_SIZE + asduLength, mac, APROFILE_MAC_SIZE);
 
     int secureLength = APROFILE_HEADER_SIZE + asduLength + APROFILE_MAC_SIZE;
@@ -150,7 +179,7 @@ AProfile_create(void)
     {
         ctx->dsqOut = 1;
         ctx->dsqInExpected = 1;
-        generateSessionKey(ctx);
+        initializeSessionKeys(ctx);
     }
 
     return ctx;
@@ -167,14 +196,36 @@ AProfile_destroy(AProfileContext ctx)
 }
 
 bool
+AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const uint8_t* inboundKey)
+{
+    if ((ctx == NULL) || (outboundKey == NULL) || (inboundKey == NULL))
+        return false;
+
+    memcpy(ctx->sessionKeyOutbound, outboundKey, APROFILE_SESSION_KEY_LENGTH);
+    memcpy(ctx->sessionKeyInbound, inboundKey, APROFILE_SESSION_KEY_LENGTH);
+    ctx->sessionKeysSet = true;
+
+    return true;
+}
+
+void
+AProfile_resetCounters(AProfileContext ctx)
+{
+    if (ctx == NULL)
+        return;
+
+    ctx->dsqOut = 1;
+    ctx->dsqInExpected = 1;
+}
+
+bool
 AProfile_onStartDT(AProfileContext ctx)
 {
     if (ctx == NULL)
         return false;
 
     ctx->startDtSeen = true;
-    ctx->dsqOut = 1;
-    ctx->dsqInExpected = 1;
+    AProfile_resetCounters(ctx);
 
     return true;
 }
@@ -183,7 +234,7 @@ bool
 AProfile_ready(AProfileContext ctx)
 {
 #if (CONFIG_CS104_APROFILE == 1)
-    return (ctx != NULL) && ctx->startDtSeen;
+    return (ctx != NULL) && ctx->startDtSeen && ctx->sessionKeysSet;
 #else
     return false;
 #endif
@@ -196,7 +247,7 @@ AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame)
         return false;
 
 #if (CONFIG_CS104_APROFILE == 1)
-    if (ctx->startDtSeen == false)
+    if ((ctx->startDtSeen == false) || (ctx->sessionKeysSet == false))
         return false;
 
     int result = wrapPayload(ctx, frame);
@@ -236,6 +287,13 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
     }
 
 #if (CONFIG_CS104_APROFILE == 1)
+    if (ctx->sessionKeysSet == false)
+    {
+        *out = NULL;
+        *outSize = 0;
+        return APROFILE_CTRL_MSG;
+    }
+
     uint32_t receivedDsq = ((uint32_t)in[1] << 24) | ((uint32_t)in[2] << 16) |
                            ((uint32_t)in[3] << 8) | (uint32_t)in[4];
     int encodedAsduLen = ((int)in[5] << 8) | (int)in[6];
@@ -247,7 +305,7 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
         return APROFILE_CTRL_MSG;
     }
 
-    if (receivedDsq != ctx->dsqInExpected)
+    if ((receivedDsq != ctx->dsqInExpected) || (ctx->dsqInExpected == UINT32_MAX))
     {
         *out = NULL;
         *outSize = 0;
@@ -256,7 +314,12 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
 
     const int macOffset = APROFILE_HEADER_SIZE + encodedAsduLen;
     uint8_t expectedMac[APROFILE_MAC_SIZE];
-    calculateMac(ctx, in, (size_t)macOffset, expectedMac);
+    if (!calculateMac(ctx->sessionKeyInbound, in, (size_t)macOffset, expectedMac))
+    {
+        *out = NULL;
+        *outSize = 0;
+        return APROFILE_CTRL_MSG;
+    }
 
     if (memcmp(expectedMac, in + macOffset, APROFILE_MAC_SIZE) != 0)
     {
@@ -277,4 +340,3 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
     return APROFILE_PLAINTEXT;
 #endif
 }
-

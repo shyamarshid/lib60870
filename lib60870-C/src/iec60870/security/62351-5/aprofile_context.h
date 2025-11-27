@@ -25,6 +25,8 @@
 
 typedef struct sAProfileContext* AProfileContext;
 
+#define APROFILE_SESSION_KEY_LENGTH 32
+
 typedef enum
 {
     APROFILE_PLAINTEXT = 0,
@@ -39,6 +41,9 @@ void AProfile_destroy(AProfileContext ctx);
 
 bool AProfile_onStartDT(AProfileContext ctx);
 bool AProfile_ready(AProfileContext ctx);
+
+bool AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const uint8_t* inboundKey);
+void AProfile_resetCounters(AProfileContext ctx);
 
 bool AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame);
 AProfileKind AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
