@@ -54,6 +54,7 @@ include_directories(
     ${CMAKE_CURRENT_LIST_DIR}/src/inc/internal
     ${CMAKE_CURRENT_LIST_DIR}/src/common/inc
     ${CMAKE_CURRENT_LIST_DIR}/src/hal/inc
+    ${CMAKE_CURRENT_LIST_DIR}/src/iec60870/security/62351-5
 )
 
 if(WITH_MBEDTLS)
@@ -93,14 +94,15 @@ set(API_HEADERS
 	${CMAKE_CURRENT_LIST_DIR}/src/hal/inc/tls_ciphers.h
 	${CMAKE_CURRENT_LIST_DIR}/src/common/inc/linked_list.h
 	${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs101_master.h
-	${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs101_slave.h
-	${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs104_slave.h
-	${CMAKE_CURRENT_LIST_DIR}/src/inc/api/iec60870_master.h
-	${CMAKE_CURRENT_LIST_DIR}/src/inc/api/iec60870_slave.h
-	${CMAKE_CURRENT_LIST_DIR}/src/inc/api/iec60870_common.h
-	${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs101_information_objects.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs101_slave.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs104_slave.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/iec60870_master.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/iec60870_slave.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/iec60870_common.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs101_information_objects.h
         ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs104_connection.h
         ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/cs104_security.h
+        ${CMAKE_CURRENT_LIST_DIR}/src/iec60870/security/62351-5/aprofile_context.h
         ${CMAKE_CURRENT_LIST_DIR}/src/inc/api/link_layer_parameters.h
         ${CMAKE_CURRENT_LIST_DIR}/src/file-service/cs101_file_service.h
 )
