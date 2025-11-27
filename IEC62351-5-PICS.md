@@ -18,7 +18,7 @@ This document captures the current implementation coverage for the IEC 62351-5 A
 - Secure PDUs encode DSQ, AIM, AIS, and ASDU length ahead of the ciphertext/plaintext payload. These header bytes are always included as AEAD associated data or HMAC input.
 
 ## Identity and RBAC inputs
-- The A-profile APIs expose AIM/AIS and key injection hooks; certificate validation, trust anchors, and RBAC enforcement remain the responsibility of the embedding application (not implemented in this library revision).
+- The A-profile APIs expose AIM/AIS and key injection hooks; enabling security now requires the embedding application to assert successful certificate validation and role availability when calling `CS104_Connection_setSecurityConfig`, otherwise secure wrapping remains disabled.
 
 ## Security telemetry (IEC 62351-14)
 - Telemetry counters track accepted secure frames, MAC/AEAD validation failures, replay rejections, and control frames exposed to the application. See `AProfile_getTelemetry` and `AProfile_clearTelemetry`.
@@ -29,7 +29,7 @@ This document captures the current implementation coverage for the IEC 62351-5 A
 ## Gap analysis vs IEC 62351-5 application-layer security
 
 ### Station Association and key hierarchy
-- Session keys are generated locally in `AProfile_create` without any Station Association exchange, X.509 validation, or HKDF/ECDH-derived update keys; parameters passed into `CS104_Connection_setSecurityConfig` are ignored and the function only allocates an `AProfileContext`.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L108-L121】【F:lib60870-C/src/iec60870/cs104/cs104_connection.c†L1227-L1240】
+- Session keys are generated locally in `AProfile_create` without any Station Association exchange, X.509 validation, or HKDF/ECDH-derived update keys; enabling protection still depends on the caller to inject keys or request local generation before traffic flows.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L199-L236】
 - There is no support for Authentication/Encryption Update Keys, AES-256 key wrap, curve negotiation, or association identifiers within Additional Data beyond the bare AIM/AIS fields in secure PDUs.【F:lib60870-C/src/iec60870/security/62351-5/aprofile_context.c†L332-L345】
 - Implementation guidance: add Station Association PDUs, mutual certificate verification, and ECDH+HKDF derivation of update keys; wrap per-direction session keys with AES-256-KW using the Encryption Update Key and authenticate the key-change messages with the Authentication Update Key before calling `AProfile_setSessionKeys`.
 
@@ -38,8 +38,7 @@ This document captures the current implementation coverage for the IEC 62351-5 A
 - Implementation guidance: implement the IEC 62351-5 Session Key Change state machines so the controlling station can push new wrapped keys and the controlled side can authenticate and install them, resetting DSQ to 1 on success.
 
 ### Identity, trust, and RBAC
-- Certificate validation, trust-anchor handling, and role-based access control are explicitly left to the embedding application and are not implemented in this library revision.【F:IEC62351-5-PICS.md†L20-L22】
-- `CS104_Connection_setSecurityConfig` ignores the provided certificate/role parameters, so no device identity or authorization is enforced when enabling the A-profile wrapper.【F:lib60870-C/src/iec60870/cs104/cs104_connection.c†L1227-L1240】
+- Certificate validation, trust-anchor handling, and role-based access control must still be performed by the embedding application, but enabling security now requires the caller to signal successful certificate checks and available roles before payloads will be wrapped.【F:IEC62351-5-PICS.md†L20-L22】【F:lib60870-C/src/iec60870/cs104/cs104_connection.c†L1227-L1260】
 - Implementation guidance: wire the security configuration into the A-profile context, verify peer/device certificates before association, and gate inbound operations on roles per IEC 62351-8 (e.g., deny unauthorised commands and raise security events).
 
 ### Security telemetry and event reporting

@@ -54,6 +54,7 @@ struct sAProfileContext
     bool rekeyRequested;
     bool associationEstablished;
     bool certificatesVerified;
+    bool rolesAuthorized;
     bool updateKeysSet;
     uint16_t aim;
     uint16_t ais;
@@ -75,6 +76,15 @@ static mbedtls_ctr_drbg_context drbg_ctx;
 static bool rng_initialized = false;
 
 static const uint8_t defaultAesKwIv[8] = {0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u};
+
+static void
+updateAssociationState(AProfileContext ctx)
+{
+    if (ctx == NULL)
+        return;
+
+    ctx->associationEstablished = ctx->sessionKeysSet && ctx->certificatesVerified && ctx->rolesAuthorized;
+}
 
 static bool
 aesKwWrap(const uint8_t* kek, const uint8_t* plaintext, size_t plaintextLen, uint8_t* wrapped, size_t wrappedLen)
@@ -233,7 +243,7 @@ initializeSessionKeys(AProfileContext ctx)
     ctx->sessionKeyBirthMs = Hal_getMonotonicTimeInMs();
     ctx->rekeyRequested = false;
     ctx->sentMessages = 0;
-    ctx->associationEstablished = true;
+    updateAssociationState(ctx);
 }
 
 static bool
@@ -528,6 +538,7 @@ AProfile_create(void)
         memset(&ctx->telemetry, 0, sizeof(ctx->telemetry));
         ctx->associationEstablished = false;
         ctx->certificatesVerified = false;
+        ctx->rolesAuthorized = false;
         ctx->updateKeysSet = false;
     }
 
@@ -623,7 +634,7 @@ AProfile_setSessionKeys(AProfileContext ctx, const uint8_t* outboundKey, const u
     ctx->sessionKeyBirthMs = Hal_getMonotonicTimeInMs();
     ctx->rekeyRequested = false;
     ctx->sentMessages = 0;
-    ctx->associationEstablished = true;
+    updateAssociationState(ctx);
 
     return true;
 }
@@ -672,8 +683,20 @@ AProfile_markCertificatesVerified(AProfileContext ctx, bool localCertificateOk, 
         return false;
 
     ctx->certificatesVerified = localCertificateOk && peerCertificateOk;
-    ctx->associationEstablished = ctx->certificatesVerified && ctx->sessionKeysSet;
+    updateAssociationState(ctx);
     return ctx->certificatesVerified;
+}
+
+bool
+AProfile_markRolesAuthorized(AProfileContext ctx, bool rolesAuthorized)
+{
+    if (ctx == NULL)
+        return false;
+
+    ctx->rolesAuthorized = rolesAuthorized;
+    updateAssociationState(ctx);
+
+    return ctx->rolesAuthorized;
 }
 
 bool
