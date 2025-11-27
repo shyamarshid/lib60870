@@ -127,14 +127,14 @@ configureSecurity(CS104_SecurityConfig* sec, bool useStaticKeys)
     sec->dpaAlgorithm = APROFILE_DPA_HMAC_SHA256;
 #endif
 
+    sec->hasUpdateKeys = true;
+    memcpy(sec->authenticationUpdateKey, UPDATE_AUTH_KEY, sizeof(sec->authenticationUpdateKey));
+    memcpy(sec->encryptionUpdateKey, UPDATE_ENC_KEY, sizeof(sec->encryptionUpdateKey));
+
     if (useStaticKeys) {
         sec->hasStaticSessionKeys = true;
         memcpy(sec->outboundSessionKey, CLIENT_OUTBOUND_SESSION_KEY, sizeof(sec->outboundSessionKey));
         memcpy(sec->inboundSessionKey, CLIENT_INBOUND_SESSION_KEY, sizeof(sec->inboundSessionKey));
-
-        sec->hasUpdateKeys = true;
-        memcpy(sec->authenticationUpdateKey, UPDATE_AUTH_KEY, sizeof(sec->authenticationUpdateKey));
-        memcpy(sec->encryptionUpdateKey, UPDATE_ENC_KEY, sizeof(sec->encryptionUpdateKey));
     }
 }
 
