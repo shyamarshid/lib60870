@@ -193,7 +193,7 @@ main(int argc, char** argv)
 
     CS101_AppLayerParameters alParams = CS104_Connection_getAppLayerParameters(conn);
 
-    HalThread_sleep(500);
+    Thread_sleep(500);
 
     CS101_ASDU gi = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);
     CS101_ASDU_setTypeID(gi, C_IC_NA_1);
@@ -205,7 +205,7 @@ main(int argc, char** argv)
 
     CS101_ASDU cmd = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);
     CS101_ASDU_setTypeID(cmd, C_SC_NA_1);
-    InformationObject sc = (InformationObject) SingleCommand_create(NULL, 5000, true, IEC60870_QUALITY_GOOD);
+    InformationObject sc = (InformationObject) SingleCommand_create(NULL, 5000, true, false, IEC60870_QUALITY_GOOD);
     CS101_ASDU_addInformationObject(cmd, sc);
     InformationObject_destroy(sc);
     CS104_Connection_sendASDU(conn, cmd);
@@ -216,7 +216,7 @@ main(int argc, char** argv)
     CS104_Connection_sendTestCommandWithTimestamp(conn, 1, 0x4938, &testTimestamp);
 
     for (int i = 0; i < 10; i++) {
-        HalThread_sleep(1000);
+        Thread_sleep(1000);
     }
 
     CS104_Connection_close(conn);

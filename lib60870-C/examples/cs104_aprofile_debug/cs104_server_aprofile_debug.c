@@ -354,7 +354,7 @@ main(int argc, char** argv)
     int16_t scaledValue = 0;
 
     while (running) {
-        HalThread_sleep(1000);
+        Thread_sleep(1000);
 
         CS101_ASDU newAsdu = CS101_ASDU_create(alParams, false, CS101_COT_PERIODIC, 0, 1, false, false);
         InformationObject io = (InformationObject) MeasuredValueScaled_create(NULL, 110, scaledValue, IEC60870_QUALITY_GOOD);
@@ -368,12 +368,12 @@ main(int argc, char** argv)
         CS101_ASDU_destroy(newAsdu);
     }
 
-    HalThread_sleep(1000);
+    Thread_sleep(1000);
     printf("Stopping server\n");
     CS104_Slave_stop(slave);
     CS104_Slave_destroy(slave);
 
-    HalThread_sleep(500);
+    Thread_sleep(500);
 
     return 0;
 }
