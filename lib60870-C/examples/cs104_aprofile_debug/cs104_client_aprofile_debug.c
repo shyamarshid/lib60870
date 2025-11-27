@@ -9,6 +9,7 @@
 #include "cs104_security.h"
 #include "hal_thread.h"
 #include "hal_time.h"
+#include "lib60870_config.h"
 
 static const char*
 getDpaName(AProfileDpaAlgorithm algo)
@@ -89,6 +90,12 @@ configureSecurity(CS104_SecurityConfig* sec)
 }
 
 static void
+printSecurityConfig(const CS104_SecurityConfig* sec)
+{
+    printf("[CLIENT] ALS config: AIM=0x%04X AIS=0x%04X DPA=%s\n", sec->aim, sec->ais, getDpaName(sec->dpaAlgorithm));
+}
+
+static void
 handleControlTag(uint8_t tag, const CS104_SecurityConfig* sec)
 {
     if (tag == 0xE1) {
@@ -125,6 +132,8 @@ classifyApdu(const uint8_t* payload, int payloadLen, const CS104_SecurityConfig*
             uint16_t ais = ((uint16_t)payload[7] << 8) | payload[8];
             uint16_t adl = ((uint16_t)payload[9] << 8) | payload[10];
             printf("SECURE DATA: DSQ=%u AIM=0x%04X AIS=0x%04X ADL=%u\n", dsq, aim, ais, adl);
+            if (aim != sec->aim || ais != sec->ais)
+                printf("  (AIM/AIS mismatch with local config)\n");
         }
         else {
             printf("SECURE DATA: len=%d (too short for header)\n", payloadLen);
@@ -191,6 +200,11 @@ asduReceivedHandler(void* parameter, int address, CS101_ASDU asdu)
 int
 main(int argc, char** argv)
 {
+#if (CONFIG_CS104_APROFILE != 1)
+    printf("This example requires CONFIG_CS104_APROFILE=1 to be enabled in lib60870_config.h\n");
+    return -1;
+#endif
+
     const char* ip = "localhost";
     uint16_t port = IEC_60870_5_104_DEFAULT_PORT;
     const char* localIp = NULL;
@@ -215,6 +229,7 @@ main(int argc, char** argv)
 
     CS104_SecurityConfig sec;
     configureSecurity(&sec);
+    printSecurityConfig(&sec);
 
     CS104_CertConfig cert = { .localCertificateVerified = true, .peerCertificateVerified = true };
     CS104_RoleConfig role = { .rolesAvailable = true };
