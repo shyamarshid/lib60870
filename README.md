@@ -74,6 +74,23 @@ There are different runtime and compile-time configuration options.
 
 Compile time configuration options can be used to shrink down the library for small embedded systems. Compile time configuration can be changed by modifying the file _config/lib60870_config.h_.
 
+### IEC 62351-5 PICS snapshot
+
+The 104 A-profile security layer is enabled by default so secure paths are
+available in development builds. Key lifetimes and DSQ handling are steered by
+the following defaults (adjustable in `config/lib60870_config.h`):
+
+- `CONFIG_CS104_APROFILE_MAX_MESSAGES_PER_SESSION` = 100000 secure ASDUs before
+  requesting a key update
+- `CONFIG_CS104_APROFILE_MAX_SESSION_AGE_MS` = 600000 ms maximum lifetime of a
+  session key set
+- `CONFIG_CS104_APROFILE_DSQ_REKEY_MARGIN` = 32 sequence numbers reserved to
+  avoid wraparound without forcing an application crash
+
+Applications that negotiate keys through a Station Association should poll
+`AProfile_requiresRekey` and trigger their preferred exchange workflow when it
+returns true.
+
 ## Memory allocation
 
 The library uses dynamic memory allocation (malloc/calloc wrapped by own functions that can be replaced when required).
