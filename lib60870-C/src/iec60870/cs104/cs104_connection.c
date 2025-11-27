@@ -1229,8 +1229,6 @@ void
 CS104_Connection_setSecurityConfig(CS104_Connection self, const CS104_SecurityConfig* sec,
                                    const CS104_CertConfig* cert, const CS104_RoleConfig* role)
 {
-    (void)role;
-
     if (self->sec)
     {
         AProfile_destroy(self->sec);
@@ -1253,6 +1251,13 @@ CS104_Connection_setSecurityConfig(CS104_Connection self, const CS104_SecurityCo
 
     if (cert)
         AProfile_markCertificatesVerified(self->sec, cert->localCertificateVerified, cert->peerCertificateVerified);
+    else
+        AProfile_markCertificatesVerified(self->sec, false, false);
+
+    if (role)
+        AProfile_markRolesAuthorized(self->sec, role->rolesAvailable);
+    else
+        AProfile_markRolesAuthorized(self->sec, false);
 
     if (sec->hasUpdateKeys)
         AProfile_setUpdateKeys(self->sec, sec->authenticationUpdateKey, sec->encryptionUpdateKey);

@@ -74,6 +74,7 @@ bool AProfile_unwrapAndInstallSessionKeys(AProfileContext ctx, const uint8_t* wr
                                          size_t wrappedOutboundLen, const uint8_t* wrappedInbound,
                                          size_t wrappedInboundLen);
 bool AProfile_markCertificatesVerified(AProfileContext ctx, bool localCertificateOk, bool peerCertificateOk);
+bool AProfile_markRolesAuthorized(AProfileContext ctx, bool rolesAuthorized);
 bool AProfile_forceLocalKeyRotation(AProfileContext ctx);
 void AProfile_resetCounters(AProfileContext ctx);
 
