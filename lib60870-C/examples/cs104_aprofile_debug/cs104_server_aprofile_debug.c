@@ -4,12 +4,12 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "lib60870_config.h"
 #include "cs101_information_objects.h"
 #include "cs104_security.h"
 #include "cs104_slave.h"
 #include "hal_thread.h"
 #include "hal_time.h"
-#include "lib60870_config.h"
 
 #include "mbedtls/pk.h"
 #include "mbedtls/x509_crt.h"
