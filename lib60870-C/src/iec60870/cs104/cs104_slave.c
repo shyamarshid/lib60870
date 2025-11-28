@@ -81,6 +81,10 @@ MasterConnection_activate(MasterConnection self);
 static bool
 MasterConnection_isActive(MasterConnection self);
 
+#if (CONFIG_CS104_APROFILE == 1)
+static void sendPendingAProfileControl(MasterConnection self);
+#endif
+
 #define CS104_DEFAULT_PORT 2404
 
 static struct sCS104_APCIParameters defaultConnectionParameters = {
@@ -2058,6 +2062,28 @@ sendASDU(MasterConnection self, uint8_t* buffer, int msgSize, uint64_t entryId, 
     printSendBuffer(self);
 }
 
+#if (CONFIG_CS104_APROFILE == 1)
+static void
+sendPendingAProfileControl(MasterConnection self)
+{
+    if ((self == NULL) || (self->sec == NULL))
+        return;
+
+    if (AProfile_hasPendingControl(self->sec))
+    {
+        Frame ctrlFrame = (Frame)T104Frame_create();
+        if (AProfile_emitPendingControl(self->sec, (T104Frame)ctrlFrame))
+        {
+            T104Frame_prepareToSend((T104Frame)ctrlFrame, self->sendCount, self->receiveCount);
+            sendMessage(self, T104Frame_getBuffer(ctrlFrame), T104Frame_getMsgSize(ctrlFrame));
+            self->sendCount = (self->sendCount + 1) % 32768;
+        }
+        else
+            T104Frame_destroy((T104Frame)ctrlFrame);
+    }
+}
+#endif
+
 static bool
 sendASDUInternal(MasterConnection self, CS101_ASDU asdu)
 {
@@ -3036,7 +3062,10 @@ handleMessage(MasterConnection self, uint8_t* buffer, int msgSize)
 
 #if (CONFIG_CS104_APROFILE == 1)
             if (self->sec)
+            {
                 AProfile_onStartDT(self->sec);
+                sendPendingAProfileControl(self);
+            }
 #endif
         }
 

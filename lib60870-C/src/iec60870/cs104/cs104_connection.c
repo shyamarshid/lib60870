@@ -82,6 +82,9 @@ typedef struct
 } SentASDU;
 
 static void sendIMessageAndUpdateSentASDUs(CS104_Connection self, Frame frame);
+#if (CONFIG_CS104_APROFILE == 1)
+static void sendPendingAProfileControl(CS104_Connection self);
+#endif
 
 struct sCS104_Connection
 {
@@ -779,6 +782,14 @@ checkMessage(CS104_Connection self, uint8_t* buffer, int msgSize)
             writeToSocket(self, STARTDT_CON_MSG, STARTDT_CON_MSG_SIZE);
 
             self->conState = STATE_ACTIVE;
+
+#if (CONFIG_CS104_APROFILE == 1)
+            if (self->sec)
+            {
+                AProfile_onStartDT(self->sec);
+                sendPendingAProfileControl(self);
+            }
+#endif
         }
         else if (buffer[2] == 0x0b)
         { /* STARTDT_CON */
@@ -788,7 +799,10 @@ checkMessage(CS104_Connection self, uint8_t* buffer, int msgSize)
 
 #if (CONFIG_CS104_APROFILE == 1)
             if (self->sec)
+            {
                 AProfile_onStartDT(self->sec);
+                sendPendingAProfileControl(self);
+            }
 #endif
         }
         else if (buffer[2] == 0x23)
@@ -1408,6 +1422,24 @@ sendIMessageAndUpdateSentASDUs(CS104_Connection self, Frame frame)
 
     self->newestSentASDU = currentIndex;
 }
+
+#if (CONFIG_CS104_APROFILE == 1)
+static void
+sendPendingAProfileControl(CS104_Connection self)
+{
+    if ((self == NULL) || (self->sec == NULL))
+        return;
+
+    if (AProfile_hasPendingControl(self->sec))
+    {
+        Frame ctrl = (Frame)T104Frame_create();
+        if (AProfile_emitPendingControl(self->sec, (T104Frame)ctrl))
+            sendIMessageAndUpdateSentASDUs(self, ctrl);
+        else
+            T104Frame_destroy((T104Frame)ctrl);
+    }
+}
+#endif
 
 static bool
 sendASDUInternal(CS104_Connection self, Frame frame)
