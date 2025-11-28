@@ -1202,6 +1202,17 @@ AProfile_onStartDT(AProfileContext ctx)
     ctx->startDtSeen = true;
     AProfile_resetCounters(ctx);
 
+    log_progress("STARTDT observed - resetting ALS state");
+
+    if ((ctx->associationEstablished == false) && (ctx->associationInProgress == false)
+        && (ctx->pendingControlLen == 0))
+    {
+        if (encodeAssociationRequest(ctx))
+            log_progress("Queued ALS association request after STARTDT (E1)");
+        else
+            log_progress("Failed to queue ALS association request after STARTDT");
+    }
+
     return true;
 }
 
@@ -1320,6 +1331,7 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
                     {
                         memcpy(ctx->assocNoncePeer, in + offset, nonceLen);
                         encodeAssociationResponse(ctx, peerPub, peerPubLen, ctx->assocNoncePeer, nonceLen);
+                        log_progress("Received ALS association request (E1); prepared response (E2)");
                     }
                 }
             }
@@ -1331,6 +1343,7 @@ AProfile_handleInPdu(AProfileContext ctx, const uint8_t* in, int inSize,
         if ((in[0] == APROFILE_TAG_ASSOCIATION_RESPONSE) && (ctx->awaitingAssociationResponse))
         {
             processAssociationResponse(ctx, in, (size_t)inSize);
+            log_progress("Received ALS association response (E2) - scheduling session key change (E3/E4)");
             ctx->telemetry.controlFrames++;
             return APROFILE_CTRL_MSG;
         }
