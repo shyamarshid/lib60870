@@ -23,6 +23,7 @@
 #include "hal_time.h"
 #include "lib_memory.h"
 
+#include <stdio.h>
 #include <limits.h>
 #include <stddef.h>
 #include <string.h>
@@ -101,13 +102,39 @@ static bool rng_initialized = false;
 
 static const uint8_t defaultAesKwIv[8] = {0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u, 0xa6u};
 
+#if (CONFIG_CS104_APROFILE == 1)
+static void
+log_drop(const char* reason)
+{
+    printf("[APROFILE] Blocking outgoing ASDU: %s\n", reason);
+}
+
+static void
+log_progress(const char* msg)
+{
+    printf("[APROFILE] %s\n", msg);
+}
+#else
+static void log_drop(const char* reason) { (void)reason; }
+static void log_progress(const char* msg) { (void)msg; }
+#endif
+
 static void
 updateAssociationState(AProfileContext ctx)
 {
     if (ctx == NULL)
         return;
 
+    bool prevAssociationEstablished = ctx->associationEstablished;
     ctx->associationEstablished = ctx->sessionKeysSet && ctx->certificatesVerified && ctx->rolesAuthorized;
+
+    if (prevAssociationEstablished != ctx->associationEstablished)
+    {
+        if (ctx->associationEstablished)
+            log_progress("Association established (session keys + certificates + roles)");
+        else
+            log_progress("Association no longer established - waiting for prerequisites");
+    }
 }
 
 static bool
@@ -1189,33 +1216,50 @@ AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame)
 
 #if (CONFIG_CS104_APROFILE == 1)
     if (ctx->pendingControlLen > 0)
+    {
+        log_progress("Sending pending ALS control PDU");
         return AProfile_emitPendingControl(ctx, frame);
+    }
 
     if ((ctx->startDtSeen == false))
+    {
+        log_drop("STARTDT not seen");
         return false;
+    }
 
     if (ctx->associationEstablished == false)
     {
         if (ctx->associationInProgress == false)
+        {
             encodeAssociationRequest(ctx);
+            log_progress("Initiating association (E1)");
+        }
 
         if (ctx->pendingControlLen > 0)
             return AProfile_emitPendingControl(ctx, frame);
 
+        log_drop("Association not established yet");
         return false;
     }
 
     if (ctx->sessionKeysSet == false)
+    {
+        log_drop("Session keys not set");
         return false;
+    }
 
     if (AProfile_requiresRekey(ctx))
     {
         if ((ctx->awaitingKeyChangeResponse == false) && !encodeSessionKeyChangeRequest(ctx))
+        {
+            log_drop("Failed to encode session key change request");
             return false;
+        }
 
         if (ctx->pendingControlLen > 0)
             return AProfile_emitPendingControl(ctx, frame);
 
+        log_drop("Waiting for session key change to complete");
         return false;
     }
 
@@ -1224,8 +1268,11 @@ AProfile_wrapOutAsdu(AProfileContext ctx, T104Frame frame)
     {
         ctx->dsqOut++;
         ctx->sentMessages++;
+        log_progress("Sending secure ASDU payload");
         return true;
     }
+
+    log_drop("Failed to wrap payload");
 #endif
 
     return false;

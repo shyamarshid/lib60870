@@ -2061,7 +2061,7 @@ sendASDU(MasterConnection self, uint8_t* buffer, int msgSize, uint64_t entryId, 
 static bool
 sendASDUInternal(MasterConnection self, CS101_ASDU asdu)
 {
-    bool asduSent;
+    bool asduSent = false;
 
     if (MasterConnection_isActive(self))
     {
@@ -2082,8 +2082,11 @@ sendASDUInternal(MasterConnection self, CS101_ASDU asdu)
             bool allowSend = true;
 
             #if (CONFIG_CS104_APROFILE == 1)
+            allowSend = false;
             if (self->sec)
                 allowSend = AProfile_wrapOutAsdu(self->sec, (T104Frame)frame);
+            else
+                printf("[APROFILE] Missing security context - dropping outgoing ASDU\n");
             #endif
 
             if (allowSend)
@@ -2091,13 +2094,16 @@ sendASDUInternal(MasterConnection self, CS101_ASDU asdu)
                 frameBuffer.msgSize = Frame_getMsgSize(frame);
 
                 sendASDU(self, frameBuffer.msg, frameBuffer.msgSize, 0, NULL);
+                asduSent = true;
+            }
+            else
+            {
+                printf("[APROFILE] ASDU send blocked (security preconditions not met)\n");
             }
 
 #if (CONFIG_USE_SEMAPHORES == 1)
             Semaphore_post(self->sentASDUsLock);
 #endif
-
-            asduSent = true;
         }
         else
         {
@@ -2107,8 +2113,6 @@ sendASDUInternal(MasterConnection self, CS101_ASDU asdu)
             asduSent = HighPriorityASDUQueue_enqueue(self->highPrioQueue, asdu);
         }
     }
-    else
-        asduSent = false;
 
     if (asduSent == false)
         DEBUG_PRINT("CS104 SLAVE: unable to send response (state=%i)\n", self->state);
