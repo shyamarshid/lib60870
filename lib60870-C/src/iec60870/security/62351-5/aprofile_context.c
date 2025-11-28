@@ -126,7 +126,14 @@ updateAssociationState(AProfileContext ctx)
         return;
 
     bool prevAssociationEstablished = ctx->associationEstablished;
-    ctx->associationEstablished = ctx->sessionKeysSet && ctx->certificatesVerified && ctx->rolesAuthorized;
+    /*
+     * Treat the association as complete only after STARTDT has been seen. This
+     * avoids logging an established association at server start when static
+     * credentials (certificates/roles/keys) have been pre-configured but no
+     * ALS control handshake has occurred yet.
+     */
+    ctx->associationEstablished = ctx->startDtSeen && ctx->sessionKeysSet && ctx->certificatesVerified
+                                   && ctx->rolesAuthorized;
 
     if (prevAssociationEstablished != ctx->associationEstablished)
     {
