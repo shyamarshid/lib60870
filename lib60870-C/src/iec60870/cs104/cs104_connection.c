@@ -1425,14 +1425,21 @@ sendASDUInternal(CS104_Connection self, Frame frame)
             bool allowSend = true;
 
             #if (CONFIG_CS104_APROFILE == 1)
+            allowSend = false;
             if (self->sec)
                 allowSend = AProfile_wrapOutAsdu(self->sec, (T104Frame)frame);
+            else
+                printf("[APROFILE] Missing security context - dropping outgoing ASDU\n");
             #endif
 
             if (allowSend)
             {
                 sendIMessageAndUpdateSentASDUs(self, frame);
                 retVal = true;
+            }
+            else
+            {
+                printf("[APROFILE] ASDU send blocked (security preconditions not met)\n");
             }
         }
 
