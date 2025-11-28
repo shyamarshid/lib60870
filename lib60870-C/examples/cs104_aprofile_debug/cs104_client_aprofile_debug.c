@@ -86,6 +86,7 @@ print_hex(const uint8_t* b, int len)
 
 static volatile bool startDtConfirmed = false;
 static volatile bool associationEstablished = false;
+static volatile bool connectionClosed = false;
 
 static const uint8_t UPDATE_AUTH_KEY[APROFILE_SESSION_KEY_LENGTH] = {
     0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
@@ -248,9 +249,12 @@ connectionHandler(void* parameter, CS104_Connection connection, CS104_Connection
     switch (event) {
     case CS104_CONNECTION_OPENED:
         printf("[CLIENT] Connection opened\n");
+        connectionClosed = false;
         break;
     case CS104_CONNECTION_CLOSED:
-        printf("[CLIENT] Connection closed\n");
+        printf("[CLIENT] Connection closed (startdt=%s assoc=%s)\n", startDtConfirmed ? "yes" : "no",
+               associationEstablished ? "yes" : "no");
+        connectionClosed = true;
         associationEstablished = false;
         break;
     case CS104_CONNECTION_STARTDT_CON_RECEIVED:
@@ -261,7 +265,8 @@ connectionHandler(void* parameter, CS104_Connection connection, CS104_Connection
         printf("[CLIENT] STOPDT_CON received\n");
         break;
     case CS104_CONNECTION_FAILED:
-        printf("[CLIENT] Connection failed\n");
+        printf("[CLIENT] Connection failed (startdt=%s assoc=%s)\n", startDtConfirmed ? "yes" : "no",
+               associationEstablished ? "yes" : "no");
         break;
     default:
         break;
@@ -377,19 +382,45 @@ main(int argc, char** argv)
 
     startDtConfirmed = false;
     associationEstablished = false;
+    connectionClosed = false;
+    uint64_t startDtAttemptMs = Hal_getTimeInMs();
+    uint64_t lastWaitLogMs = startDtAttemptMs;
     CS104_Connection_sendStartDT(conn);
 
-    for (int i = 0; (i < 50) && (startDtConfirmed == false); i++)
+    for (int i = 0; (i < 50) && (startDtConfirmed == false); i++) {
         Thread_sleep(100);
 
-    if (startDtConfirmed == false)
-        printf("[CLIENT] STARTDT_CON not received within timeout\n");
+        uint64_t now = Hal_getTimeInMs();
+        if ((now - lastWaitLogMs) >= 500) {
+            printf("[CLIENT] Waiting for STARTDT_CON... elapsed=%llums\n", (unsigned long long) (now - startDtAttemptMs));
+            lastWaitLogMs = now;
+        }
 
-    for (int i = 0; (i < 200) && (associationEstablished == false); i++)
+        if (connectionClosed)
+            break;
+    }
+
+    if (startDtConfirmed == false)
+        printf("[CLIENT] STARTDT_CON not received within timeout (closed=%s)\n",
+               connectionClosed ? "yes" : "no");
+
+    uint64_t assocStartMs = Hal_getTimeInMs();
+    lastWaitLogMs = assocStartMs;
+
+    for (int i = 0; (i < 200) && (associationEstablished == false) && (connectionClosed == false); i++) {
         Thread_sleep(50);
 
+        uint64_t now = Hal_getTimeInMs();
+        if ((now - lastWaitLogMs) >= 500) {
+            printf("[CLIENT] Waiting for ALS association... elapsed=%llums startdt=%s\n",
+                   (unsigned long long) (now - assocStartMs), startDtConfirmed ? "yes" : "no");
+            lastWaitLogMs = now;
+        }
+    }
+
     if (associationEstablished == false) {
-        printf("[CLIENT] ALS association not completed within timeout; skipping application traffic\n");
+        printf("[CLIENT] ALS association not completed within timeout; skipping application traffic (closed=%s)\n",
+               connectionClosed ? "yes" : "no");
     }
     else {
         CS101_ASDU gi = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);

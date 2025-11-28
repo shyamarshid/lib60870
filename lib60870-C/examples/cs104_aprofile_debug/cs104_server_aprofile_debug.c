@@ -58,6 +58,9 @@ load_peer_crt(const char* crt)
 
 static volatile bool running = true;
 static volatile bool associationEstablished = false;
+static volatile bool connected = false;
+static uint64_t connectionStartMs = 0;
+static uint64_t lastAssociationLogMs = 0;
 
 static void
 sigint_handler(int sig)
@@ -243,9 +246,15 @@ rawMessageHandler(void* parameter, IMasterConnection connection, uint8_t* msg, i
     print_hex(msg, msgSize);
     printf("\n");
 
-    if (msgSize > 6 && msg[0] == 0x68) {
-        int payloadLen = msgSize - 6;
-        classifyApdu(msg + 6, payloadLen, sec);
+    if (msgSize >= 2 && msg[0] == 0x68) {
+        int apduLen = msg[1];
+        int payloadLen = apduLen - 4; /* length field excludes start byte and length byte */
+
+        if ((apduLen + 2) != msgSize)
+            printf("[SERVER] Warning: APDU length byte=%d but frame has %d bytes\n", apduLen, msgSize);
+
+        if (payloadLen > 0 && msgSize >= 6)
+            classifyApdu(msg + 6, payloadLen, sec);
     }
 }
 
@@ -398,8 +407,6 @@ connectionRequestHandler(void* parameter, const char* ipAddress)
     return true;
 }
 
-static bool connected = false;
-
 static void
 connectionEventHandler(void* parameter, IMasterConnection con, CS104_PeerConnectionEvent event)
 {
@@ -408,11 +415,14 @@ connectionEventHandler(void* parameter, IMasterConnection con, CS104_PeerConnect
     if (event == CS104_CON_EVENT_CONNECTION_OPENED) {
         printf("Connection opened (%p)\n", con);
         connected = true;
+        connectionStartMs = Hal_getTimeInMs();
+        lastAssociationLogMs = connectionStartMs;
         associationEstablished = false;
     }
     else if (event == CS104_CON_EVENT_CONNECTION_CLOSED) {
-        printf("Connection closed (%p)\n", con);
+        printf("Connection closed (%p) (assoc=%s)\n", con, associationEstablished ? "yes" : "no");
         associationEstablished = false;
+        connected = false;
     }
     else if (event == CS104_CON_EVENT_ACTIVATED) {
         printf("Connection activated (%p)\n", con);
@@ -525,8 +535,17 @@ main(int argc, char** argv)
     while (running) {
         Thread_sleep(1000);
 
-        if (associationEstablished == false)
+        if (associationEstablished == false) {
+            if (connected) {
+                uint64_t now = Hal_getTimeInMs();
+                if ((now - lastAssociationLogMs) >= 2000) {
+                    printf("[SERVER] Waiting for ALS association... elapsed=%llums\n",
+                           (unsigned long long) (now - connectionStartMs));
+                    lastAssociationLogMs = now;
+                }
+            }
             continue;
+        }
 
         CS101_ASDU newAsdu = CS101_ASDU_create(alParams, false, CS101_COT_PERIODIC, 0, 1, false, false);
         InformationObject io = (InformationObject) MeasuredValueScaled_create(NULL, 110, scaledValue, IEC60870_QUALITY_GOOD);
