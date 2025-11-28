@@ -85,6 +85,7 @@ print_hex(const uint8_t* b, int len)
 }
 
 static volatile bool startDtConfirmed = false;
+static volatile bool associationEstablished = false;
 
 static const uint8_t UPDATE_AUTH_KEY[APROFILE_SESSION_KEY_LENGTH] = {
     0xA0, 0xA1, 0xA2, 0xA3, 0xA4, 0xA5, 0xA6, 0xA7,
@@ -174,6 +175,7 @@ handleControlTag(uint8_t tag, const CS104_SecurityConfig* sec)
     }
     else if (tag == 0xE2) {
         printf("[ALS] Association 0x%04X/0x%04X completed, DPA=%s\n", sec->aim, sec->ais, getDpaName(sec->dpaAlgorithm));
+        associationEstablished = true;
     }
     else if (tag == 0xE3) {
         printf("[ALS] Session Key Change started\n");
@@ -249,6 +251,7 @@ connectionHandler(void* parameter, CS104_Connection connection, CS104_Connection
         break;
     case CS104_CONNECTION_CLOSED:
         printf("[CLIENT] Connection closed\n");
+        associationEstablished = false;
         break;
     case CS104_CONNECTION_STARTDT_CON_RECEIVED:
         printf("[CLIENT] STARTDT_CON received\n");
@@ -373,6 +376,7 @@ main(int argc, char** argv)
     CS101_AppLayerParameters alParams = CS104_Connection_getAppLayerParameters(conn);
 
     startDtConfirmed = false;
+    associationEstablished = false;
     CS104_Connection_sendStartDT(conn);
 
     for (int i = 0; (i < 50) && (startDtConfirmed == false); i++)
@@ -381,27 +385,35 @@ main(int argc, char** argv)
     if (startDtConfirmed == false)
         printf("[CLIENT] STARTDT_CON not received within timeout\n");
 
-    CS101_ASDU gi = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);
-    CS101_ASDU_setTypeID(gi, C_IC_NA_1);
-    InformationObject qoi = (InformationObject) InterrogationCommand_create(NULL, 0, IEC60870_QOI_STATION);
-    CS101_ASDU_addInformationObject(gi, qoi);
-    InformationObject_destroy(qoi);
-    CS104_Connection_sendASDU(conn, gi);
-    CS101_ASDU_destroy(gi);
+    for (int i = 0; (i < 200) && (associationEstablished == false); i++)
+        Thread_sleep(50);
 
-    CS101_ASDU cmd = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);
-    CS101_ASDU_setTypeID(cmd, C_SC_NA_1);
-    InformationObject sc = (InformationObject) SingleCommand_create(NULL, 5000, true, false, IEC60870_QUALITY_GOOD);
-    CS101_ASDU_addInformationObject(cmd, sc);
-    InformationObject_destroy(sc);
-    CS104_Connection_sendASDU(conn, cmd);
-    CS101_ASDU_destroy(cmd);
+    if (associationEstablished == false) {
+        printf("[CLIENT] ALS association not completed within timeout; skipping application traffic\n");
+    }
+    else {
+        CS101_ASDU gi = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);
+        CS101_ASDU_setTypeID(gi, C_IC_NA_1);
+        InformationObject qoi = (InformationObject) InterrogationCommand_create(NULL, 0, IEC60870_QOI_STATION);
+        CS101_ASDU_addInformationObject(gi, qoi);
+        InformationObject_destroy(qoi);
+        CS104_Connection_sendASDU(conn, gi);
+        CS101_ASDU_destroy(gi);
 
-    struct sCP56Time2a testTimestamp;
-    CP56Time2a_createFromMsTimestamp(&testTimestamp, Hal_getTimeInMs());
-    CS104_Connection_sendTestCommandWithTimestamp(conn, 1, 0x4938, &testTimestamp);
+        CS101_ASDU cmd = CS101_ASDU_create(alParams, false, CS101_COT_ACTIVATION, 0, 1, false, false);
+        CS101_ASDU_setTypeID(cmd, C_SC_NA_1);
+        InformationObject sc = (InformationObject) SingleCommand_create(NULL, 5000, true, false, IEC60870_QUALITY_GOOD);
+        CS101_ASDU_addInformationObject(cmd, sc);
+        InformationObject_destroy(sc);
+        CS104_Connection_sendASDU(conn, cmd);
+        CS101_ASDU_destroy(cmd);
 
-    for (int i = 0; i < 10; i++) {
+        struct sCP56Time2a testTimestamp;
+        CP56Time2a_createFromMsTimestamp(&testTimestamp, Hal_getTimeInMs());
+        CS104_Connection_sendTestCommandWithTimestamp(conn, 1, 0x4938, &testTimestamp);
+    }
+
+    for (int i = 0; i < 20; i++) {
         Thread_sleep(1000);
     }
 

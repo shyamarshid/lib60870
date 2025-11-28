@@ -57,6 +57,7 @@ load_peer_crt(const char* crt)
 }
 
 static volatile bool running = true;
+static volatile bool associationEstablished = false;
 
 static void
 sigint_handler(int sig)
@@ -189,6 +190,7 @@ handleControlTag(uint8_t tag, const CS104_SecurityConfig* sec)
     }
     else if (tag == 0xE2) {
         printf("[ALS] Association 0x%04X/0x%04X completed, DPA=%s\n", sec->aim, sec->ais, getDpaName(sec->dpaAlgorithm));
+        associationEstablished = true;
     }
     else if (tag == 0xE3) {
         printf("[ALS] Session Key Change started\n");
@@ -406,15 +408,18 @@ connectionEventHandler(void* parameter, IMasterConnection con, CS104_PeerConnect
     if (event == CS104_CON_EVENT_CONNECTION_OPENED) {
         printf("Connection opened (%p)\n", con);
         connected = true;
+        associationEstablished = false;
     }
     else if (event == CS104_CON_EVENT_CONNECTION_CLOSED) {
         printf("Connection closed (%p)\n", con);
+        associationEstablished = false;
     }
     else if (event == CS104_CON_EVENT_ACTIVATED) {
         printf("Connection activated (%p)\n", con);
     }
     else if (event == CS104_CON_EVENT_DEACTIVATED) {
         printf("Connection deactivated (%p)\n", con);
+        associationEstablished = false;
     }
 }
 
@@ -519,6 +524,9 @@ main(int argc, char** argv)
 
     while (running) {
         Thread_sleep(1000);
+
+        if (associationEstablished == false)
+            continue;
 
         CS101_ASDU newAsdu = CS101_ASDU_create(alParams, false, CS101_COT_PERIODIC, 0, 1, false, false);
         InformationObject io = (InformationObject) MeasuredValueScaled_create(NULL, 110, scaledValue, IEC60870_QUALITY_GOOD);
